@@ -96,9 +96,10 @@ def write_png(path, w, h):
     open(path, "wb").write(data)
 
 
-def write_tiff16(path, w, h):
+def write_tiff16(path, w, h, gain=1.0):
     """Uncompressed 16-bit RGB, untagged -> the host must read it as linear ProPhoto."""
-    pix = b"".join(struct.pack("<HHH", int(65535 * x / (w - 1)) // 4, int(65535 * y / (h - 1)) // 4, 8000)
+    pix = b"".join(struct.pack("<HHH", int(gain * 65535 * x / (w - 1)) // 4, int(gain * 65535 * y / (h - 1)) // 4,
+                               int(gain * 8000))
                    for y in range(h) for x in range(w))
     entries = [(256, 4, 1, w), (257, 4, 1, h), (258, 3, 3, None), (259, 3, 1, 1), (262, 3, 1, 2),
                (273, 4, 1, None), (277, 3, 1, 3), (278, 4, 1, h), (279, 4, 1, len(pix))]
@@ -317,6 +318,71 @@ def extras(host, sid, path, tmp, label, raw, probe):
         check(not h["ok"] and h["error"]["code"] == "unsupported", f"{label}: white balance on a raster unsupported")
 
 
+def pair_checks(host, tmp):
+    """open_pair: two frames on one piece of 135, each metered by itself."""
+    if "open_pair" not in HELLO_METHODS:
+        return
+    bright, dark = os.path.join(tmp, "pair-bright.tif"), os.path.join(tmp, "pair-dark.tif")
+    write_tiff16(bright, 60, 80, 1.0)
+    write_tiff16(dark, 60, 80, 1.0 / 16)       # four stops darker
+    params = {"overscan_active": False}
+    for turned in (False, True):
+        label = "pair" + (" turned" if turned else "")
+        h, _ = host.call("open_pair", {"holes": [{"path": bright}, {"path": dark}], "spacing_mm": 1.0,
+                                       "turned": turned, "params": params})
+        if not check(h["ok"], f"{label}: open_pair", h.get("error")):
+            continue
+        r = h["result"]
+        lay = r["layout"]
+        w, hh = r["width"], r["height"]
+        along, across = (lay["hole_h"], lay["hole_w"]) if turned else (lay["hole_w"], lay["hole_h"])
+        check(abs(across / along - 24 / 18) < 0.05, f"{label}: each hole is 18 x 24", f"{lay}")
+        check((hh if turned else w) == lay["advance"] + along and (w if turned else hh) == across,
+              f"{label}: the piece is two holes one advance apart", f"{w}x{hh}")
+        ev = r["metered_ev"]
+        check(abs((ev[1] - ev[0]) - 4.0) < 0.6, f"{label}: each hole is metered by itself", f"{ev}")
+        sid = r["session"]
+        h, px = host.call("render", {"session": sid, "tier": "full", "format": "rgba8", "display": "srgb"})
+        if check(h["ok"], f"{label}: renders", h.get("error")):
+            im = h["result"]["image"]
+            W, H = im["width"], im["height"]
+
+            def mean(x0, y0, x1, y1):
+                vals = [px[4 * (y * W + x) + c] for y in range(y0, y1) for x in range(x0, x1) for c in range(3)]
+                return sum(vals) / max(len(vals), 1)
+            if turned:
+                a = mean(0, 0, W, H // 3); b = mean(0, 2 * H // 3, W, H)
+                gap = mean(0, along * H // hh, W, lay["advance"] * H // hh)
+            else:
+                a = mean(0, 0, W // 3, H); b = mean(2 * W // 3, 0, W, H)
+                gap = mean(along * W // w, 0, lay["advance"] * W // w, H)
+            check(abs(a - b) < 0.25 * max(a, b), f"{label}: the two frames print alike after their meters", f"{a:.1f} {b:.1f}")
+            check(gap < 0.5 * min(a, b), f"{label}: the gap is unexposed", f"gap {gap:.1f}")
+        h, _ = host.call("redecode", {"session": sid, "decode": {}})
+        check(not h["ok"] and h["error"]["code"] == "unsupported", f"{label}: redecode is refused")
+        host.call("close", {"session": sid})
+    # On the strip: the film edge's half-frame pair.
+    if "overscan" not in UNSUPPORTED:
+        h, _ = host.call("open_pair", {"holes": [{"path": bright}, {"path": dark}], "spacing_mm": 1.0, "turned": False,
+                                       "params": {"overscan_active": True, "overscan_format": "135_half",
+                                                  "overscan_pair": True}})
+        if check(h["ok"], "pair on the strip: open_pair", h.get("error")):
+            sid = h["result"]["session"]
+            h, _ = host.call("render", {"session": sid, "tier": "live", "format": "rgba8", "display": "srgb"})
+            check(h["ok"], "pair on the strip: renders", h.get("error"))
+            h, _ = host.call("overscan_geometry", {"session": sid})
+            check(h["ok"] and len(h["result"].get("gates", [])) == 2, "pair on the strip: two gates",
+                  h.get("result", h.get("error")))
+            host.call("close", {"session": sid})
+    h, _ = host.call("open_pair", {"holes": [{"path": bright}, None], "params": {}})
+    check(h["ok"], "a pair with an empty hole opens", h.get("error"))
+    if h["ok"]:
+        host.call("close", {"session": h["result"]["session"]})
+
+
+HELLO_METHODS = set()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", required=True)
@@ -338,6 +404,7 @@ def main():
     b = h["result"]["backend"]
     print(f'     backend: {b}', flush=True)
     UNSUPPORTED.update(h["result"].get("capabilities", {}).get("backend", {}).get("unsupported_features", []))
+    HELLO_METHODS.update(h["result"].get("methods", []))
     if not check(b.get("available"), "engine available", b.get("error", "")):
         return 1
     h, _ = host.call("ping")
@@ -397,6 +464,7 @@ def main():
     tif = os.path.join(tmp, "ramp16.tif")
     write_tiff16(tif, 80, 120)
     exercise(host, tif, tmp, "tiff16", False)
+    pair_checks(host, tmp)
     for i, raw in enumerate([] if a.quick else a.raws):
         exercise(host, raw, tmp, f"raw{i}-{os.path.basename(raw)}", True)
 

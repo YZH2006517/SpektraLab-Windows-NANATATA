@@ -128,6 +128,7 @@ falls back to `spk_render` and reports `reprinted: false` when the engine refuse
 | `export_cube` | `{print_stock, path, overwrite?}` | `{path, size}` — the baked print LUT (`spk_print_lut_table`), domain 0..1 of normalised negative density |
 | `export_di` | `{session, print_stock?, path, overwrite?}` | `{path, width, height, bytes, di: <spk_export_di JSON>}` — 16-bit TIFF of normalised negative density, no ICC (it is not a colour space) |
 | `export_cineon_di` | `{session, path, overwrite?}` | `{path, width, height, bytes, di: {encoding: "cineon", primaries, printing_density_paper}}` — RFC-028's Digital Intermediate as the Mac exports it: the session's own negative, Cineon log in the output primaries, 16-bit TIFF, no ICC, the camera's EXIF. Refused for a slide film |
+| `open_pair` | `{holes: [hole \| null, hole \| null], spacing_mm?, turned?, params?}`, hole = `{path, decode?, exposure_ev?, placement?: {scale, x, y, quarter_turns}}` | as `open`, `kind: "pair"`, plus `metadata_b` (the second frame's), `metered_ev` (each hole's own meter), `layout: {hole_w, hole_h, advance, turned}` — a half-frame pair composed as the Mac's PairComposer does (18 × 24 mm holes, the gap unexposed), each hole metered by itself and exposed at that EV plus `exposure_ev`, then opened with the meter off. `redecode` on it is `unsupported`: re-open it |
 
 Files carry EXIF (TIFF Exif IFD, JPEG APP1, PNG eXIf): Make, Model,
 LensModel, DateTimeOriginal, ExposureTime, FNumber, ISO, FocalLength, the

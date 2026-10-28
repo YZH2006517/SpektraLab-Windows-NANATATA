@@ -3,6 +3,7 @@ add_executable(spektralab-host
     main.cpp
     image_io.cpp
     output.cpp
+    pair.cpp
     platform.cpp
     stb_impl.cpp
     tiff_ifd.cpp

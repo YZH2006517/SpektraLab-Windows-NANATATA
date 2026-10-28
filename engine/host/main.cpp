@@ -32,6 +32,7 @@
 #include "image_io.hpp"
 #include "json.hpp"
 #include "output.hpp"
+#include "pair.hpp"
 #include "platform.hpp"
 #include "spektrafilm/spk_engine.h"
 
@@ -365,7 +366,7 @@ Json m_hello(const Request&) {
     r.set("capabilities", std::move(caps));
     Json methods = Json::array();
     for (const char* m : {"hello", "ping", "shutdown", "params_schema", "print_lut_catalog", "memory_report",
-                          "probe", "thumbnail", "open", "redecode", "close", "set_params", "get_params", "solve", "render",
+                          "probe", "thumbnail", "open", "open_pair", "redecode", "close", "set_params", "get_params", "solve", "render",
                           "scene_latitude", "overscan_geometry", "preview_stock_lut", "cancel", "progress",
                           "export_image", "export_cube", "export_di", "export_cineon_di", "write_image"})
         methods.push(str(m));
@@ -529,11 +530,123 @@ Json m_open(const Request& q) {
     return open_reply(*s, d, opened, open_ms);
 }
 
+// A half-frame pair (the Mac's PairComposer): two frames composed onto one
+// piece of 135, then opened as any frame. Each hole is metered by itself --
+// its picture alone through the engine's meter -- and exposed at that EV plus
+// its own `exposure_ev`, so the black gap between the holes cannot pull the
+// meter and each picture is exposed as it would be on its own. The piece is
+// then opened with the meter off. Request: {holes: [hole | null, hole | null],
+// spacing_mm, turned, params}, a hole being {path, decode?, exposure_ev?,
+// placement?: {scale, x, y, quarter_turns}}.
+Json m_open_pair(const Request& q) {
+    need_engine();
+    const Json& holes = q.params.at("holes");
+    if (!holes.is_array() || holes.items().size() != 2)
+        throw HostError{"bad_request", "open_pair: holes must be an array of two (a hole may be null)"};
+    const double spacing = std::clamp(q.params.at("spacing_mm").as_double(1.0), 0.5, 2.0);
+    const bool turned = q.params.at("turned").as_bool(false);
+    const auto t0 = Clock::now();
+
+    Decoded d[2];
+    bool present[2] = {false, false};
+    PairPlacement place[2];
+    double exposure_ev[2] = {0, 0};
+    uint32_t w[2] = {0, 0}, h[2] = {0, 0};
+    for (int side = 0; side < 2; ++side) {
+        const Json& hole = holes.items()[size_t(side)];
+        if (!hole.is_object()) continue;
+        const fs::path path = utf8_path(require_string(hole, "path"));
+        d[side] = decode_frame(path, decode_options(hole.at("decode")));
+        present[side] = true;
+        const Json& pl = hole.at("placement");
+        place[side].scale = pl.at("scale").as_double(1.0);
+        place[side].x = pl.at("x").as_double(0.0);
+        place[side].y = pl.at("y").as_double(0.0);
+        place[side].quarter_turns = pl.at("quarter_turns").as_int(0);
+        exposure_ev[side] = std::clamp(hole.at("exposure_ev").as_double(0.0), -6.0, 6.0);
+        w[side] = d[side].frame.width;
+        h[side] = d[side].frame.height;
+    }
+    const PairLayout layout = pair_layout_for(w, h, place, spacing, turned);
+    const double decode_ms = ms_since(t0);
+
+    // Each hole's own meter, with the session's intent.
+    Json delta = q.params.at("params").is_object() ? q.params.at("params") : Json::object();
+    Json meter_delta = Json::object();
+    meter_delta.set("auto_exposure", Json(true));
+    if (delta.at("auto_exposure_method").is_string()) meter_delta.set("auto_exposure_method", delta.at("auto_exposure_method"));
+    const bool metering = delta.at("auto_exposure").as_bool(true);
+    double metered[2] = {0, 0};
+    for (int side = 0; side < 2 && metering; ++side) {
+        if (!present[side]) continue;
+        const FloatImage pic = hole_picture(d[side].frame, place[side], layout);
+        Json opened;
+        double open_ms = 0;
+        spk_session* probe = engine_open(pic, meter_delta.dump(), opened, open_ms);
+        char* reply = nullptr;
+        const spk_status st = spk_solve(probe, "exposure", &reply);
+        Json solved = st == SPK_OK ? take_json(reply) : Json();
+        if (st != SPK_OK && reply) spk_string_free(reply);
+        spk_session_release(probe);
+        if (st != SPK_OK) engine_fail(st, "open_pair: meter");
+        metered[side] = solved.at("solved_params").at("exposure_compensation_ev").as_double(0.0);
+    }
+
+    FloatImage piece;
+    piece.width = layout.width();
+    piece.height = layout.height();
+    piece.rgb.assign(size_t(piece.width) * piece.height * 3, 0.0f);
+    for (int side = 0; side < 2; ++side)
+        if (present[side]) place_into(d[side].frame, place[side], std::exp2(metered[side] + exposure_ev[side]), layout, side, piece);
+
+    // The piece is exposed already: the meter would only see the gap.
+    delta.set("auto_exposure", Json(false));
+    Json opened;
+    double open_ms = 0;
+    spk_session* handle = engine_open(piece, delta.dump(), opened, open_ms);
+
+    const int first = present[0] ? 0 : 1;
+    auto s = std::make_shared<Session>();
+    s->handle = handle;
+    s->path.clear();   // no one file: redecode is refused
+    s->width = piece.width;
+    s->height = piece.height;
+    s->metadata = d[first].probe.metadata;
+    s->output_space = output_space_of(opened.at("params"));
+    {
+        std::lock_guard<std::mutex> lock(g.sessions_mutex);
+        s->id = "s" + std::to_string(g.next_session++);
+        g.sessions[s->id] = s;
+    }
+    log_line(1, "open_pair " + s->id + " " + std::to_string(piece.width) + "x" + std::to_string(piece.height) +
+                    " holes " + std::to_string(layout.hole_w) + "x" + std::to_string(layout.hole_h));
+
+    Decoded shown;
+    shown.frame.width = piece.width;
+    shown.frame.height = piece.height;
+    shown.probe = d[first].probe;
+    shown.decode_ms = decode_ms;
+    Json r = open_reply(*s, shown, opened, open_ms);
+    r.set("kind", str("pair"));
+    r.set("metadata_b", present[1] ? metadata_json(d[1].probe.metadata) : Json());
+    Json evs = Json::array();
+    for (int side = 0; side < 2; ++side) evs.push(present[side] ? number(metered[side]) : Json());
+    r.set("metered_ev", std::move(evs));
+    Json lj = Json::object();
+    lj.set("hole_w", number(layout.hole_w));
+    lj.set("hole_h", number(layout.hole_h));
+    lj.set("advance", number(layout.advance));
+    lj.set("turned", Json(layout.turned));
+    r.set("layout", std::move(lj));
+    return r;
+}
+
 // R2: decode the session's file again with other decode settings, keeping its
 // id and its params. The engine session is replaced (a new source means a new
 // negative); on any failure the old one is untouched.
 Json m_redecode(const Request& q) {
     auto s = find_session(q.params);
+    if (s->path.empty()) throw HostError{"unsupported", "a half-frame pair is re-opened, not re-decoded (open_pair)"};
     const DecodeOptions options = decode_options(q.params.at("decode"));
     Decoded d = decode_frame(utf8_path(s->path), options);
     char* current = nullptr;
@@ -930,6 +1043,7 @@ void dispatch(const Request& q) {
     else if (m == "probe") result = m_probe(q);
     else if (m == "thumbnail") result = m_thumbnail(q, payload);
     else if (m == "open") result = m_open(q);
+    else if (m == "open_pair") result = m_open_pair(q);
     else if (m == "close") result = m_close(q);
     else if (m == "redecode") result = m_redecode(q);
     else if (m == "set_params") result = m_set_params(q);
