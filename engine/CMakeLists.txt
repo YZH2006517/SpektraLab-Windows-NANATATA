@@ -46,12 +46,12 @@ add_library(spektralab_pipeline OBJECT
     src/pipeline/pipeline.cpp
     src/pipeline/scene_latitude.cpp
     src/pipeline/contrast_mask.cpp
+    src/pipeline/overscan.cpp
 )
 set_target_properties(spektralab_pipeline PROPERTIES POSITION_INDEPENDENT_CODE ON)
-if(APPLE)
-    target_sources(spektralab_pipeline PRIVATE src/pipeline/overscan.cpp)
-else()
-    target_sources(spektralab_pipeline PRIVATE src/pipeline/windows_unported.cpp)
+if(NOT APPLE)
+    # CoreGraphics, CoreText and vImage's stand-in for the film edge.
+    target_sources(spektralab_pipeline PRIVATE src/pipeline/edge_raster.cpp)
 endif()
 target_link_libraries(spektralab_pipeline PRIVATE spektralab_core)
 target_include_directories(spektralab_pipeline PRIVATE
@@ -116,6 +116,8 @@ if(NOT APPLE)
             spk_zoom_bilinear_mirror spk_geometry_resample_df
             spk_lut3d_trilinear spk_di_normalise spk_di_encode
             spk_scene_latitude spk_mask_reduce spk_mask_epilogue
+            spk_overscan_canvas spk_overscan_add_mask spk_overscan_film_present
+            spk_overscan_light spk_highlight_headroom
             CACHE INTERNAL "")
         set(vulkan_spirv)
         file(GLOB vulkan_includes "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/vulkan/*.glsl")

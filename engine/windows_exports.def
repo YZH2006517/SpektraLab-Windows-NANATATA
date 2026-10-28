@@ -20,6 +20,7 @@ EXPORTS
     spk_render_digital_intermediate
     spk_scene_latitude
     spk_contrast_mask_field
+    spk_overscan_geometry
     spk_output_transform
     spk_result_free
     spk_session_release

@@ -832,19 +832,34 @@ def main():
 
 
 def product_overlay(tmp):
-    """engine/resources with the product's profiles laid over it, by symlink (as bw_checks.py does)."""
+    """The engine's resources with the product's profiles laid over it, by symlink (as bw_checks.py does).
+
+    The base is the resources the library under test resolves -- on Windows and
+    Linux the build's, which alone carry the compiled SPIR-V -- and a copy
+    stands in for a link where the OS will not make one (Windows without
+    Developer Mode)."""
+    import shutil
+    from spk_test_paths import resolve_resources
     engine = Path(__file__).resolve().parents[1]
+    base = Path(resolve_resources())
+
+    def link(src, dst):
+        try:
+            os.symlink(src, dst, target_is_directory=src.is_dir())
+        except OSError:
+            (shutil.copytree if src.is_dir() else shutil.copy2)(src, dst)
+
     res = Path(tmp) / "resources"
     (res / "profiles").mkdir(parents=True)
-    for f in (engine / "resources").iterdir():
+    for f in base.iterdir():
         if f.name != "profiles":
-            os.symlink(f, res / f.name)
-    for d in (engine / "resources" / "profiles", engine / "resources_product" / "profiles"):
+            link(f, res / f.name)
+    for d in (base / "profiles", engine / "resources_product" / "profiles"):
         for f in d.glob("*.json"):
             dst = res / "profiles" / f.name
             if dst.exists() or dst.is_symlink():
                 dst.unlink()
-            os.symlink(f, dst)
+            link(f, dst)
     return res
 
 

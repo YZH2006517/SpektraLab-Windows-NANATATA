@@ -1,0 +1,86 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// ① + ② + the fog of ③ (overscan.metal spk_overscan_canvas): raw exposure on
+// the film canvas -- the frame through the gate's penumbra, the gate flare,
+// edge fog and spool leaks.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Frame { float value[]; } frame;
+layout(set = 0, binding = 1, std430) readonly buffer Parameters { float value[]; } p_data;
+layout(set = 0, binding = 2, std430) readonly buffer Count { uint value[]; } count_data;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float value[]; } output_data;
+
+#include "spk_overscan_common.glsl"
+
+vec3 sample_frame(float fx, float fy, uint fw, uint fh) {
+    fx = clamp(fx, 0.0, float(fw) - 1.0);
+    fy = clamp(fy, 0.0, float(fh) - 1.0);
+    uint x0 = uint(floor(fx)), y0 = uint(floor(fy));
+    uint x1 = min(x0 + 1u, fw - 1u), y1 = min(y0 + 1u, fh - 1u);
+    float ax = fx - float(x0), ay = fy - float(y0);
+    uint i00 = 3u * (y0 * fw + x0), i01 = 3u * (y0 * fw + x1);
+    uint i10 = 3u * (y1 * fw + x0), i11 = 3u * (y1 * fw + x1);
+    vec3 a = vec3(frame.value[i00], frame.value[i00 + 1u], frame.value[i00 + 2u]);
+    vec3 b = vec3(frame.value[i01], frame.value[i01 + 1u], frame.value[i01 + 2u]);
+    vec3 c = vec3(frame.value[i10], frame.value[i10 + 1u], frame.value[i10 + 2u]);
+    vec3 d = vec3(frame.value[i11], frame.value[i11 + 1u], frame.value[i11 + 2u]);
+    return mix(mix(a, b, ax), mix(c, d, ax), ay);
+}
+
+void main() {
+    uint i = spk_global_index();
+    if (i >= count_data.value[0]) return;
+    uint cw = uint(P(P_CW));
+    vec2 st = canvas_to_film(float(i % cw), float(i / cw));
+    float W = P(P_FILM_W);
+    vec3 e = vec3(0.0);
+    if (P(P_CARRIER) > 1.5 || (st.y >= 0.0 && st.y <= W)) {
+        // A pair: past the middle of the gap, the second exposure of the same gate.
+        vec2 sg = st;
+        float shift = 0.0;
+        if (P(P_PAIR_ADV) > 0.0 && st.x > P(P_GS0) + 0.5 * (P(P_GW) + P(P_PAIR_ADV))) {
+            shift = P(P_PAIR_ADV);
+            sg.x -= shift;
+        }
+        float cov = penumbra(gate_sdf(sg), P(P_PENUMBRA));
+        if (cov > 0.0) {
+            float px = P(P_PX);
+            float fx, fy;
+            if (P(P_VERTICAL) < 0.5) { fx = (st.x - P(P_GS0)) / px - 0.5; fy = (st.y - P(P_GT0)) / px - 0.5; }
+            else                     { fx = (P(P_GT0) + P(P_GH) - st.y) / px - 0.5; fy = (st.x - P(P_GS0)) / px - 0.5; }
+            e += cov * sample_frame(fx, fy, uint(P(P_FW)), uint(P(P_FH)));
+        }
+        // Gate flare: a thin line just outside the frame that follows the
+        // scene's brightness along the edge.
+        float d_gate = gate_sdf(sg);
+        if (P(P_FLARE_AMP) > 0.0 && d_gate > -0.02 && d_gate < 6.0 * P(P_FLARE_WIDTH)) {
+            float px = P(P_PX);
+            float in_s = clamp(sg.x, P(P_GS0) + 0.12, P(P_GS0) + P(P_GW) - 0.12) + shift;
+            float in_t = clamp(st.y, P(P_GT0) + 0.12, P(P_GT0) + P(P_GH) - 0.12);
+            float fx, fy;
+            if (P(P_VERTICAL) < 0.5) { fx = (in_s - P(P_GS0)) / px - 0.5; fy = (in_t - P(P_GT0)) / px - 0.5; }
+            else                     { fx = (P(P_GT0) + P(P_GH) - in_t) / px - 0.5; fy = (in_s - P(P_GS0)) / px - 0.5; }
+            vec3 edge_light = sample_frame(fx, fy, uint(P(P_FW)), uint(P(P_FH)));
+            float prof = exp(-max(d_gate, 0.0) / P(P_FLARE_WIDTH));
+            e += P(P_FLARE_AMP) * prof * edge_light;
+        }
+        // Edge fog, slowly varying along the length, and the spool leaks.
+        float d_top = max(st.y, 0.0), d_bot = max(W - st.y, 0.0);
+        uint seed = uint(P(P_FOG_SEED));
+        float period = max(P(P_FOG_PERIOD), 0.1);
+        float nz = 0.6 * value_noise(st.x / period, seed) +
+                   0.4 * value_noise(st.x / (0.37 * period), seed ^ 0xA5A5A5A5u);
+        float fog = P(P_FOG_AMP) * exp(-min(d_top, d_bot) / max(P(P_FOG_WIDTH), 1e-3)) * (0.3 + 0.7 * nz);
+        uint nl = uint(P(P_N_LEAKS));
+        for (uint k = 0u; k < nl; ++k) {
+            uint b = P_LEAKS + 5u * k;
+            float dd = P(b + 1u) < 0.5 ? d_top : d_bot;
+            float ds = st.x - P(b);
+            fog += P(b + 2u) * exp(-ds * ds / (2.0 * P(b + 3u) * P(b + 3u))) * exp(-dd / P(b + 4u));
+        }
+        e += fog * vec3(P(P_FOG_R), P(P_FOG_G), P(P_FOG_B));
+    }
+    output_data.value[3u * i] = e.x;
+    output_data.value[3u * i + 1u] = e.y;
+    output_data.value[3u * i + 2u] = e.z;
+}

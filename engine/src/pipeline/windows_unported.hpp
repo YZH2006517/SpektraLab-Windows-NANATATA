@@ -15,8 +15,8 @@ namespace spk {
 inline constexpr bool kPortedDigitalIntermediate = true;
 inline constexpr bool kPortedSceneLatitude = true;
 inline constexpr bool kPortedContrastMask = true;
-inline constexpr bool kPortedOverscan = false;
-inline constexpr bool kPortedDateImprint = false;
+inline constexpr bool kPortedOverscan = true;
+inline constexpr bool kPortedDateImprint = true;
 
 inline std::vector<const char*> windows_unported_features() {
     std::vector<const char*> out;

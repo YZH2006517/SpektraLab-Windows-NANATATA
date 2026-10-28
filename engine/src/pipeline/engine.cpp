@@ -48,6 +48,7 @@
 #include "print_lut.hpp"
 #include "setup_cache.hpp"
 #ifndef __APPLE__
+#include "edge_raster.hpp"
 #include "windows_unported.hpp"
 #endif
 
@@ -577,6 +578,18 @@ spk_engine* spk_engine_create(const char* resources_dir, void* device) {
     if (!engine->print_luts.init(engine->resources_dir, error)) { g_error = error; return nullptr; }
 
 #ifndef __APPLE__
+    // The film edge's and the date's faces (resources/fonts/README.txt). A
+    // build without them is incomplete, like one without the constants.
+    edge::set_font_directory(engine->resources_dir + "/fonts");
+    {
+        double width = 0.0;
+        for (const char* face : {"HelveticaNeue", "HelveticaNeue-Bold", "ArialNarrow", "Menlo-Bold"})
+            if (!edge::text_width(face, 1.0, "0", 0.0, width) || !(width > 0.0)) {
+                g_error = std::string("cannot load the font for ") + face + " from " +
+                          engine->resources_dir + "/fonts";
+                return nullptr;
+            }
+    }
     if (device) { g_error = "Windows device-buffer input is not implemented yet; pass null"; return nullptr; }
     engine->gpu = gpu::Gpu::create_vulkan(engine->resources_dir + "/vulkan", error);
 #else

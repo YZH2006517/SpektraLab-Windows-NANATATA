@@ -19,9 +19,13 @@
 //                 and (on 120, which is not sprocket-locked) where the edge
 //                 numbers land.
 // Text is rasterised with CoreText/CoreGraphics.
+#ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreText/CoreText.h>
+#else
+#include "edge_raster.hpp"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -856,6 +860,7 @@ void film_to_canvas_px(const OverscanLayout& L, double s, double t, double& x, d
     y = v / L.px;
 }
 
+#ifdef __APPLE__
 CFAttributedStringRef make_text(const Op& op, CTFontRef font, double gain) {
     CFStringRef str = CFStringCreateWithCString(nullptr, op.text.c_str(), kCFStringEncodingUTF8);
     CGFloat white[] = {CGFloat(std::clamp(gain, 0.0, 1.0)), 1.0};
@@ -870,6 +875,7 @@ CFAttributedStringRef make_text(const Op& op, CTFontRef font, double gain) {
     CFRelease(attrs); CFRelease(kern); CFRelease(col); CFRelease(gray); CFRelease(str);
     return as;
 }
+#endif
 
 // Rasterise one group into a canvas-aligned coverage bitmap (its bounding box).
 bool rasterise(const OverscanLayout& L, const Group& g, std::vector<float>& cov, int& x0, int& y0,
@@ -905,6 +911,7 @@ bool rasterise(const OverscanLayout& L, const Group& g, std::vector<float>& cov,
     w = x1 - x0; h = y1 - y0;
     if (w <= 0 || h <= 0) return false;
 
+#ifdef __APPLE__
     std::vector<uint8_t> px(size_t(w) * size_t(h), 0);
     CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
     CGContextRef ctx = CGBitmapContextCreate(px.data(), size_t(w), size_t(h), 8, size_t(w), gray,
@@ -985,6 +992,57 @@ bool rasterise(const OverscanLayout& L, const Group& g, std::vector<float>& cov,
                 != kvImageNoError)
             return false;
     }
+#else
+    // The same picture without CoreGraphics, CoreText or vImage
+    // (edge_raster.hpp): the CTM chain above as one affine map, each op
+    // filled and composited in turn, the same Gaussian.
+    const double sigma = g.blur_mm / L.px;
+    {
+        const double a = L.A[0], b = L.A[1], c = L.A[2], d = L.A[3], det = a * d - b * c;
+        const edge::Affine film_to_px = edge::Affine::translate(-x0, -y0)
+            .then_after(edge::Affine::scale(1.0 / L.px, 1.0 / L.px))
+            .then_after(edge::Affine::translate(L.cu, L.cv))
+            .then_after(edge::Affine{d / det, -c / det, -b / det, a / det, 0, 0})
+            .then_after(edge::Affine::translate(-L.cs, -L.ct));
+        const double px_per_mm = std::sqrt(std::fabs(film_to_px.a * film_to_px.d - film_to_px.b * film_to_px.c));
+        edge::Canvas canvas(w, h);
+        for (const Op& op : g.ops) {
+            std::vector<edge::Contour> path;
+            if (op.kind == Op::Poly) {
+                edge::Contour contour;
+                for (size_t k = 0; k + 1 < op.pts.size(); k += 2)
+                    contour.push_back(film_to_px.apply({op.pts[k], op.pts[k + 1]}));
+                path.push_back(std::move(contour));
+            } else if (op.kind == Op::Circle) {
+                edge::Contour contour = edge::circle({op.pts[0], op.pts[1]}, op.size_mm, px_per_mm);
+                for (edge::Point& q : contour) q = film_to_px.apply(q);
+                path.push_back(std::move(contour));
+            } else {
+                // CTM: about (s, t), turned, and the whole line widened when
+                // the advances scale; the text matrix widens only the glyphs
+                // and turns y up (t is down; glyphs are up).
+                edge::Affine to_px = film_to_px
+                    .then_after(edge::Affine::translate(op.s, op.t))
+                    .then_after(edge::Affine::rotate(op.rot_deg * M_PI / 180.0));
+                if (op.scale_advances) to_px = to_px.then_after(edge::Affine::scale(op.hscale, 1.0));
+                to_px = to_px.then_after(edge::Affine::scale(1.0, -1.0));
+                if (!edge::text_outline(op.font, op.size_mm, op.text, op.tracking_mm,
+                                        op.scale_advances ? 1.0 : op.hscale, to_px, path))
+                    return false;
+            }
+            canvas.fill(path, op.gain);
+        }
+        canvas.coverage(cov);
+    }
+    if (sigma > 0.3) {
+        const int r = int(std::ceil(3.0 * sigma));
+        std::vector<float> k(size_t(2 * r + 1));
+        double sum = 0.0;
+        for (int i = -r; i <= r; ++i) { k[size_t(i + r)] = float(std::exp(-0.5 * i * i / (sigma * sigma))); sum += k[size_t(i + r)]; }
+        for (float& v : k) v = float(v / sum);
+        edge::blur(cov, w, h, k);
+    }
+#endif
     return true;
 }
 
@@ -1373,6 +1431,7 @@ double dot_text(const std::string& text, const DotFace& f, double ps, double pt,
 
 // A Helvetica-family string's advance in film mm, as CoreText lays it out.
 double text_width(const char* font, double size_mm, const std::string& text, double tracking_mm, double hscale) {
+#ifdef __APPLE__
     Op op;
     op.font = font; op.size_mm = size_mm; op.text = text; op.tracking_mm = tracking_mm;
     CFStringRef fname = CFStringCreateWithCString(nullptr, font, kCFStringEncodingUTF8);
@@ -1383,6 +1442,14 @@ double text_width(const char* font, double size_mm, const std::string& text, dou
     const double w = CTLineGetTypographicBounds(line, nullptr, nullptr, nullptr);
     CFRelease(line); CFRelease(as); CFRelease(f);
     return w * hscale;
+#else
+    double w = 0.0;
+    // A font that will not load still lays the marks out; rasterise() then
+    // refuses to draw them, which the render reports.
+    if (!edge::text_width(font, size_mm, text, tracking_mm, w))
+        w = (0.6 * size_mm + tracking_mm) * double(text.size());
+    return w * hscale;
+#endif
 }
 
 // The film edge -- the stock's own (`edge_look_for`), measured on the owner's

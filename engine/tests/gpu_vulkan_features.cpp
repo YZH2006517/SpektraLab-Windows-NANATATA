@@ -392,6 +392,55 @@ bool check_contrast_mask(Gpu* gpu, std::string& error) {
         }
     return true;
 }
+// ---------------------------------------------------------------------------
+// spk_highlight_headroom (nodes.metal): not one of the five, but the halation
+// of a film with no anti-halation layer runs it, and it had no Vulkan port
+// ---------------------------------------------------------------------------
+
+bool check_highlight_headroom(Gpu* gpu, std::string& error) {
+    std::mt19937 rng(25);
+    std::uniform_real_distribution<float> stops(-12.0f, 3.0f), tint(-1.5f, 0.0f);
+    const float clip = 4.7f, mid = 0.184f;
+    const float p[7] = {1.0f / clip, -1.0f, 1.0f / 1.0f, 2.5f, 1.0f / mid, 1.5f, 1.0f / 2.0f};
+    const uint32_t counts[] = {1, 255, 256, 257, 5003};
+    for (uint32_t count : counts) {
+        std::vector<float> x(3 * size_t(count));
+        for (uint32_t i = 0; i < count; ++i) {
+            const float m = clip * std::exp2(std::min(stops(rng), 0.0f));
+            const int top = int(i % 3);
+            for (int c = 0; c < 3; ++c) x[3 * i + c] = c == top ? m : m * std::exp2(tint(rng));
+        }
+        if (count > 4) {
+            x[0] = x[1] = x[2] = 0.0f;                                // black: g = 1
+            x[3] = -0.2f; x[4] = -0.1f; x[5] = -0.3f;                 // no positive channel: g = 1
+            x[6] = clip; x[7] = 0.5f * clip; x[8] = 0.1f;             // at the clip
+            x[9] = x[10] = x[11] = mid;                               // mid-grey: under the floor
+        }
+        std::vector<double> expected(x.size());
+        for (uint32_t i = 0; i < count; ++i) {
+            const double m = std::max(double(x[3 * i]), std::max(double(x[3 * i + 1]), double(x[3 * i + 2])));
+            double g = 1.0;
+            if (m > 0.0) {
+                auto ss = [](double t) { t = std::clamp(t, 0.0, 1.0); return t * t * (3.0 - 2.0 * t); };
+                const double lm = std::log2(m);
+                const double near_clip = ss((lm + std::log2(double(p[0])) - p[1]) * p[2]);
+                const double over_floor = ss((lm + std::log2(double(p[4])) - p[5]) * p[6]);
+                g = std::exp2(p[3] * near_clip * over_floor);
+            }
+            for (int c = 0; c < 3; ++c) expected[3 * i + c] = double(x[3 * i + c]) * g;
+        }
+        auto input = gpu->upload(x.data(), x.size() * sizeof(float), error);
+        auto params = gpu->upload(p, sizeof p, error);
+        auto output = output_buffer(gpu, x.size(), error);
+        const uint32_t n[1] = {count};
+        if (!input || !params || !output ||
+            !gpu->dispatch("spk_highlight_headroom", {Arg::buf(input), Arg::buf(params),
+                               Arg::inline_bytes(n, 1), Arg::buf(output)}, count, error) ||
+            // 2^(2.5 s): float log2/exp2 over a 2.5-stop gain, ~1e-6 relative.
+            !check_values(gpu, output, expected, "highlight_headroom", 1e-30, 3e-6, error)) return false;
+    }
+    return true;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -401,7 +450,8 @@ int main(int argc, char** argv) {
     if (!gpu) { std::fprintf(stderr, "Vulkan device: %s\n", error.c_str()); return 1; }
     std::printf("Vulkan device: %s\n", gpu->device_name().c_str());
     if (!check_di_encode(gpu.get(), error) || !check_scene_latitude(gpu.get(), error) ||
-        !check_contrast_mask(gpu.get(), error)) {
+        !check_contrast_mask(gpu.get(), error) ||
+        !check_highlight_headroom(gpu.get(), error)) {
         std::fprintf(stderr, "features: %s\n", error.c_str());
         return 1;
     }

@@ -250,7 +250,12 @@ def extras(host, sid, path, tmp, label, raw, probe):
         if not check(h["ok"], f"{label}: {field} accepted", h.get("error")):
             continue
         h, px = host.call("render", {"session": sid, "tier": "live", "format": "rgba8", "display": "srgb"})
-        if check(h["ok"], f"{label}: {field} renders", h.get("error")):
+        # The film edge cuts the frame to the gate: a frame of another shape is
+        # refused by name (the same on every backend), not drawn wrongly.
+        if (field == "overscan_active" and not h["ok"]
+                and "gate's shape" in h.get("error", {}).get("message", "")):
+            check(True, f"{label}: {field} refuses a frame that is not the gate's shape", h["error"]["message"])
+        elif check(h["ok"], f"{label}: {field} renders", h.get("error")):
             im = h["result"]["image"]
             check(len(px) == im["width"] * im["height"] * 4, f"{label}: {field} payload")
         h, _ = host.call("set_params", {"session": sid, "delta": {field: False}})

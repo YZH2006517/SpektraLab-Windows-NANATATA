@@ -52,7 +52,10 @@ void render_with(spk_engine* engine, spk_session* session, const std::string& ke
     const std::string off = "{\"" + key + "\":false}";
     require(spk_set_params(session, off.c_str(), nullptr) == SPK_OK, "could not turn off " + key);
     require(params(session) == before, "turning " + key + " off did not restore the session");
-    render(engine, session);
+    spk_result plain{};
+    const bool rendered = spk_render(session, "full", &plain) == SPK_OK && plain.rgba16;
+    spk_result_free(&plain);
+    require(rendered, "render failed after turning " + key + " off: " + spk_last_error(engine));
 }
 
 }  // namespace
@@ -88,10 +91,21 @@ int main(int argc, char** argv) {
             {"overscan_active", "overscan", "overscan"},
             {"date_imprint_active", "date_imprint", "date imprint"},
         }};
+        // The film edge cuts the frame to the gate, so it needs a picture of
+        // the gate's shape (135: 36.25 x 24.3 mm; the engine allows 5 %).
+        std::vector<float> gate_pixels(48 * 32 * 3);
+        for (size_t i = 0; i < gate_pixels.size(); ++i) gate_pixels[i] = 0.025f + float(i % 29) * 0.025f;
+        const spk_image gate_input{gate_pixels.data(), 48, 32, 3};
+        std::unique_ptr<spk_session, decltype(&spk_session_release)> gate_session(
+            spk_open(engine.get(), &gate_input, nullptr, nullptr), spk_session_release);
+        require(bool(gate_session), std::string("gate-shaped open failed: ") + spk_last_error(engine.get()));
+        const std::string gate_before = params(gate_session.get());
         int ported = 0;
         for (const Feature& feature : features) {
             if (!listed(feature.capability)) {
-                render_with(engine.get(), session.get(), feature.key, before);
+                const bool gate = std::string(feature.key) == "overscan_active";
+                render_with(engine.get(), gate ? gate_session.get() : session.get(), feature.key,
+                            gate ? gate_before : before);
                 ++ported;
                 continue;
             }
