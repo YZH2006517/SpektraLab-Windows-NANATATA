@@ -4,6 +4,7 @@
 // past the logical output, and a tolerance stated per kernel.
 #include "gpu/gpu.hpp"
 #include "gpu_vulkan_read.hpp"
+#include "latitude_fit.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -19,6 +20,7 @@ namespace {
 using spk::gpu::Arg;
 using spk::gpu::BufferRef;
 using spk::gpu::Gpu;
+using spk::SceneLatitudeParams;
 constexpr float kGuard = -12345.25f;
 constexpr size_t kGuardCount = 11;
 size_t cases = 0;
@@ -155,6 +157,97 @@ bool check_di_encode(Gpu* gpu, std::string& error) {
         }
     return true;
 }
+// ---------------------------------------------------------------------------
+// spk_scene_latitude (scene_latitude.metal), RFC-023; the reference is the
+// engine's own double-precision `slm::delta`
+// ---------------------------------------------------------------------------
+
+bool check_scene_latitude(Gpu* gpu, std::string& error) {
+    struct Layout { uint32_t w, h, row0; float split; };
+    const Layout layouts[] = {{97, 41, 0, 0.0f}, {97, 41, 0, 0.45f}, {23, 61, 0, 0.5f}, {23, 61, 17, 0.5f}};
+    const float rolloffs[] = {1.0f, 2.0f, 2.7f};
+    const float y_row[3] = {0.2126729f, 0.7151522f, 0.0721750f};
+    const float n_ref = float(spk::slm::kMidgray);
+    std::mt19937 rng(23);
+    std::uniform_real_distribution<float> stops(-14.0f, 10.0f), tint(-0.6f, 0.6f);
+    for (uint32_t norm = 0; norm < 3; ++norm)
+        for (float m : rolloffs)
+            for (const Layout& layout : layouts) {
+                SceneLatitudeParams a, b;
+                a.highlight_knee = 1.5; a.highlight_room = 2.5; a.shadow_knee = -2.25; a.shadow_room = 3.0;
+                a.rolloff = m; a.max_lift = 2.0;
+                b = a;
+                b.highlight_knee = 0.75; b.highlight_room = 1.25; b.shadow_knee = -3.0; b.shadow_room = 0.0;
+                const float p[19] = {float(a.highlight_knee), float(a.highlight_room),
+                                     float(a.shadow_knee), float(a.shadow_room), m, float(a.max_lift),
+                                     float(norm), y_row[0], y_row[1], y_row[2], n_ref,
+                                     float(layout.w), float(layout.h + layout.row0), layout.split,
+                                     float(b.highlight_knee), float(b.highlight_room),
+                                     float(b.shadow_knee), float(b.shadow_room), float(layout.row0)};
+                // Round-tripped through float, as the kernel sees them.
+                for (SceneLatitudeParams* s : {&a, &b}) {
+                    s->highlight_knee = float(s->highlight_knee); s->shadow_knee = float(s->shadow_knee);
+                    s->rolloff = float(s->rolloff);
+                }
+                const uint32_t count = layout.w * layout.h;
+                std::vector<float> rgb(3 * size_t(count));
+                for (uint32_t i = 0; i < count; ++i) {
+                    const float level = n_ref * std::exp2(stops(rng));
+                    for (int c = 0; c < 3; ++c) rgb[3 * i + c] = level * std::exp2(tint(rng));
+                }
+                const float inf = std::numeric_limits<float>::infinity();
+                const float nan = std::numeric_limits<float>::quiet_NaN();
+                const float edge[][3] = {{0, 0, 0}, {-1, -2, -3}, {-0.5f, 0.3f, 0.02f}, {nan, 0.2f, 0.2f},
+                                         {inf, 1, 1}, {1e-30f, 1e-30f, 1e-30f}, {3e4f, 2e4f, 1e4f},
+                                         {n_ref, n_ref, n_ref}};
+                for (size_t e = 0; e < std::size(edge); ++e)
+                    for (int c = 0; c < 3; ++c) rgb[3 * e + c] = edge[e][c];
+
+                std::vector<double> expected(rgb.size());
+                for (uint32_t i = 0; i < count; ++i) {
+                    // The norm in float, as the kernel computes it: whether it
+                    // underflows to 0 (k = 1) is the kernel's behaviour, not
+                    // an error to measure. Metal's max is fmax: a NaN
+                    // component reads as 0.
+                    const float cr = std::fmax(rgb[3 * i], 0.0f);
+                    const float cg = std::fmax(rgb[3 * i + 1], 0.0f);
+                    const float cb = std::fmax(rgb[3 * i + 2], 0.0f);
+                    float vf;
+                    if (norm == 1) vf = y_row[0] * cr + y_row[1] * cg + y_row[2] * cb;
+                    else if (norm == 2) vf = std::max(cr, std::max(cg, cb));
+                    else {
+                        const float s2 = cr * cr + cg * cg + cb * cb;
+                        vf = s2 > 0.0f ? (cr * cr * cr + cg * cg * cg + cb * cb * cb) / s2 : 0.0f;
+                    }
+                    const double v = vf;
+                    double k = 1.0;
+                    if (v > 0.0 && std::isfinite(v)) {
+                        const double E = std::clamp(std::log2(std::max(v, n_ref * std::exp2(-24.0)) / n_ref),
+                                                    -24.0, 24.0);
+                        const SceneLatitudeParams* side = &a;
+                        if (layout.split > 0.0f) {
+                            const double along = layout.w >= layout.h + layout.row0
+                                ? (double(i % layout.w) + 0.5) / layout.w
+                                : (double(i / layout.w) + layout.row0 + 0.5) / (layout.h + layout.row0);
+                            if (along >= layout.split) side = &b;
+                        }
+                        k = std::clamp(std::exp2(spk::slm::delta(E, *side)), std::exp2(-30.0), std::exp2(30.0));
+                    }
+                    for (int c = 0; c < 3; ++c) expected[3 * i + c] = double(rgb[3 * i + c]) * k;
+                }
+                auto input = gpu->upload(rgb.data(), rgb.size() * sizeof(float), error);
+                auto params = gpu->upload(p, sizeof p, error);
+                auto output = output_buffer(gpu, rgb.size(), error);
+                const uint32_t n[1] = {count};
+                if (!input || !params || !output ||
+                    !gpu->dispatch("spk_scene_latitude", {Arg::buf(input), Arg::buf(params),
+                                       Arg::inline_bytes(n, 1), Arg::buf(output)}, count, error) ||
+                    // A gain is 2^d: float32 log2/pow/exp2 over |E| <= 24 stops
+                    // keep d within ~4e-7 stops, i.e. ~3e-7 relative in k.
+                    !check_values(gpu, output, expected, "scene_latitude", 1e-37, 3e-6, error)) return false;
+            }
+    return true;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -163,7 +256,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<Gpu> gpu(Gpu::create_vulkan(std::string(argv[1]) + "/vulkan", error));
     if (!gpu) { std::fprintf(stderr, "Vulkan device: %s\n", error.c_str()); return 1; }
     std::printf("Vulkan device: %s\n", gpu->device_name().c_str());
-    if (!check_di_encode(gpu.get(), error)) {
+    if (!check_di_encode(gpu.get(), error) || !check_scene_latitude(gpu.get(), error)) {
         std::fprintf(stderr, "features: %s\n", error.c_str());
         return 1;
     }

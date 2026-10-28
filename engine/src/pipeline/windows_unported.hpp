@@ -13,7 +13,7 @@
 namespace spk {
 
 inline constexpr bool kPortedDigitalIntermediate = true;
-inline constexpr bool kPortedSceneLatitude = false;
+inline constexpr bool kPortedSceneLatitude = true;
 inline constexpr bool kPortedContrastMask = false;
 inline constexpr bool kPortedOverscan = false;
 inline constexpr bool kPortedDateImprint = false;

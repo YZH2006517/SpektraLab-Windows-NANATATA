@@ -27,6 +27,10 @@ import zlib
 FAILURES = []
 
 
+# Filled from hello: the effects this backend still refuses.
+UNSUPPORTED = set()
+
+
 def check(cond, label, detail=""):
     print(("ok   " if cond else "FAIL ") + label + (f"  ({detail})" if detail else ""), flush=True)
     if not cond:
@@ -231,12 +235,26 @@ def extras(host, sid, path, tmp, label, raw, probe):
     check(h["ok"] and h["result"].get("valid") is False, f"{label}: overscan_geometry (refused feature -> invalid)")
     h, _ = host.call("progress", {"session": sid})
     check(h["ok"] and "pct" in h["result"], f"{label}: progress", h.get("error"))
-    # The five refused features are refused by name, and leave the session usable.
-    for field in ("contrast_mask_active", "scene_latitude_active", "overscan_active", "date_imprint_active",
-                  "digital_intermediate"):
+    # The five effects the first port refused: the ones hello still lists as
+    # unsupported are refused by name and leave the session usable; the rest
+    # turn on, render, and turn off again.
+    for field, feature in (("contrast_mask_active", "contrast_mask"),
+                           ("scene_latitude_active", "scene_latitude_mapping"),
+                           ("overscan_active", "overscan"), ("date_imprint_active", "date_imprint"),
+                           ("digital_intermediate", "digital_intermediate")):
         h, _ = host.call("set_params", {"session": sid, "delta": {field: True}})
-        check(not h["ok"] and h["error"]["code"] == "bad_request" and "not implemented" in h["error"]["message"],
-              f"{label}: {field} refused", h.get("error", {}).get("message", "accepted?!"))
+        if feature in UNSUPPORTED:
+            check(not h["ok"] and h["error"]["code"] == "bad_request" and "not implemented" in h["error"]["message"],
+                  f"{label}: {field} refused", h.get("error", {}).get("message", "accepted?!"))
+            continue
+        if not check(h["ok"], f"{label}: {field} accepted", h.get("error")):
+            continue
+        h, px = host.call("render", {"session": sid, "tier": "live", "format": "rgba8", "display": "srgb"})
+        if check(h["ok"], f"{label}: {field} renders", h.get("error")):
+            im = h["result"]["image"]
+            check(len(px) == im["width"] * im["height"] * 4, f"{label}: {field} payload")
+        h, _ = host.call("set_params", {"session": sid, "delta": {field: False}})
+        check(h["ok"], f"{label}: {field} off again", h.get("error"))
     h, _ = host.call("print_lut_catalog")
     stock = sorted(h["result"].keys())[0]
     h, px = host.call("preview_stock_lut", {"session": sid, "print_stock": stock, "tier": "live",
@@ -309,6 +327,7 @@ def main():
         return 1
     b = h["result"]["backend"]
     print(f'     backend: {b}', flush=True)
+    UNSUPPORTED.update(h["result"].get("capabilities", {}).get("backend", {}).get("unsupported_features", []))
     if not check(b.get("available"), "engine available", b.get("error", "")):
         return 1
     h, _ = host.call("ping")

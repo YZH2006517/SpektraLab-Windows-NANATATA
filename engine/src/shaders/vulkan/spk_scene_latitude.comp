@@ -1,0 +1,83 @@
+#version 450
+
+// RFC-023's Scene Latitude Mapping (scene_latitude.metal): a positive scalar
+// gain per pixel, computed on the stop axis and applied to the linear triple.
+// `core/latitude_fit.cpp::delta` is the double reference of the same
+// arithmetic. A norm that is zero, negative, NaN or infinite takes k = 1.
+//
+// p: 0 K_h  1 H_h (0 = off)  2 K_s  3 H_s (0 = off)  4 m  5 L_max
+//    6 norm (0 power, 1 Y, 2 max)  7..9 the working space's Y row  10 n_ref
+//    11 width  12 height  13 split (0 = none)  14..17 the second frame's
+//    K_h H_h K_s H_s  18 the image's first row in the frame
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float value[]; } input_data;
+layout(set = 0, binding = 1, std430) readonly buffer Parameters { float value[]; } p_data;
+layout(set = 0, binding = 2, std430) readonly buffer Count { uint value[]; } count_data;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float value[]; } output_data;
+
+// vulkan_gpu.cpp folds a dispatch past maxComputeWorkGroupCount[0] (65535 on
+// lavapipe and Intel) into rows of workgroups; this is the 1D index it means.
+uint spk_global_index() {
+    return gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) + gl_GlobalInvocationID.x;
+}
+
+float p(uint k) { return p_data.value[k]; }
+
+// g_m(D) - D, the branch's departure, in the forms that do not cancel near the
+// knee: exactly 0 at D = 0 through the multiply, negative beyond it.
+float slm_departure(float D, float H, float m) {
+    if (!(D > 0.0)) return 0.0;
+    if (m == 2.0) {
+        precise float r = sqrt(H * H + D * D);
+        precise float out_value = -(D * D * D) / (r * (H + r));
+        return out_value;
+    }
+    if (m == 1.0) {
+        precise float out_value = -(D * D) / (H + D);
+        return out_value;
+    }
+    precise float out_value = D * (H / pow(pow(H, m) + pow(D, m), 1.0 / m) - 1.0);
+    return out_value;
+}
+
+void main() {
+    uint i = spk_global_index();
+    if (i >= count_data.value[0]) return;
+    float r = input_data.value[3u * i], g = input_data.value[3u * i + 1u];
+    float b = input_data.value[3u * i + 2u];
+    float cr = max(r, 0.0), cg = max(g, 0.0), cb = max(b, 0.0);
+
+    precise float v;
+    uint norm = uint(p(6));
+    if (norm == 1u) {
+        v = p(7) * cr + p(8) * cg + p(9) * cb;
+    } else if (norm == 2u) {
+        v = max(cr, max(cg, cb));
+    } else {
+        precise float s2 = cr * cr + cg * cg + cb * cb;
+        v = s2 > 0.0 ? (cr * cr * cr + cg * cg * cg + cb * cb * cb) / s2 : 0.0;
+    }
+
+    float k = 1.0;
+    if (v > 0.0 && !isinf(v)) {
+        float n_ref = p(10);
+        float E = clamp(log2(max(v, n_ref * exp2(-24.0)) / n_ref), -24.0, 24.0);
+        float d = 0.0;
+        // A half-frame pair: from `split` along the long edge, the second
+        // frame's own knees and rooms (p[14..17]).
+        float Kh = p(0), Hh = p(1), Ks = p(2), Hs = p(3);
+        if (p(13) > 0.0) {
+            uint w = uint(p(11)), h = uint(p(12));
+            float along = w >= h ? (float(i % w) + 0.5) / float(w)
+                                 : (float(i / w) + p(18) + 0.5) / float(h);
+            if (along >= p(13)) { Kh = p(14); Hh = p(15); Ks = p(16); Hs = p(17); }
+        }
+        if (Hh > 0.0 && E > Kh) d = slm_departure(E - Kh, Hh, p(4));
+        else if (Hs > 0.0 && E < Ks) d = -slm_departure(Ks - E, Hs, p(4));
+        if (d > 0.0) { float L = p(5); d = d * L / sqrt(L * L + d * d); }
+        k = clamp(exp2(d), exp2(-30.0), exp2(30.0));
+    }
+    output_data.value[3u * i] = r * k;
+    output_data.value[3u * i + 1u] = g * k;
+    output_data.value[3u * i + 2u] = b * k;
+}
