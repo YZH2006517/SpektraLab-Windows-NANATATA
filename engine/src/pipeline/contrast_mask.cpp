@@ -34,7 +34,13 @@
 #include <cstdlib>
 #include <cstring>
 
+#ifdef __APPLE__
 #include <dispatch/dispatch.h>
+#else
+#include <atomic>
+#include <thread>
+#include <vector>
+#endif
 
 #include "pipeline.hpp"
 
@@ -98,11 +104,32 @@ void box(const std::vector<double>& in, std::vector<double>& out, uint32_t w, ui
 // serial loop; only the wall time changes. Measured on a 45 MP frame at the
 // live tier: the serial Gaussian was ~260 ms of a 275 ms reprint at scale
 // 0.03 and ~600 of 631 at 0.093.
+//
+// Off Apple the same contract over std::thread: lines are claimed from an
+// atomic counter, so which thread runs a line varies and what it writes does
+// not.
 template <class F>
 void for_each_line(uint32_t lines, F&& fn) {
+#ifdef __APPLE__
     struct Ctx { F* fn; } ctx{&fn};
     dispatch_apply_f(lines, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &ctx,
                      [](void* c, size_t line) { (*static_cast<Ctx*>(c)->fn)(uint32_t(line)); });
+#else
+    const uint32_t workers = std::min<uint32_t>(lines, std::max(1u, std::thread::hardware_concurrency()));
+    if (workers <= 1) {
+        for (uint32_t line = 0; line < lines; ++line) fn(line);
+        return;
+    }
+    std::atomic<uint32_t> next{0};
+    auto work = [&] {
+        for (uint32_t line; (line = next.fetch_add(1, std::memory_order_relaxed)) < lines;) fn(line);
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(workers - 1);
+    for (uint32_t t = 1; t < workers; ++t) pool.emplace_back(work);
+    work();
+    for (auto& thread : pool) thread.join();
+#endif
 }
 
 void gaussian(const std::vector<double>& in, std::vector<double>& out, uint32_t w, uint32_t h,

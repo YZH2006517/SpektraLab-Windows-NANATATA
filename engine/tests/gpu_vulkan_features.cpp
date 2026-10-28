@@ -248,6 +248,150 @@ bool check_scene_latitude(Gpu* gpu, std::string& error) {
             }
     return true;
 }
+// ---------------------------------------------------------------------------
+// spk_mask_reduce / spk_mask_epilogue (contrast_mask.metal), RFC-024
+// ---------------------------------------------------------------------------
+
+struct MaskData {
+    uint32_t nl = 81;
+    std::vector<float> chd, base, ixs, p;
+};
+
+MaskData mask_data(std::mt19937& rng, bool lo_on, bool hi_on) {
+    MaskData m;
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    m.chd.resize(3 * m.nl); m.base.resize(m.nl); m.ixs.resize(3 * m.nl);
+    for (auto& v : m.chd) v = 0.05f + unit(rng);
+    for (auto& v : m.base) v = 0.02f + 0.1f * unit(rng);
+    for (auto& v : m.ixs) v = (0.1f + unit(rng)) / float(m.nl);
+    m.p = {1.7f, 1.3f, 0.9f,  2.1f, 2.6f, 3.4f,  0.004f, 0.003f, 0.002f,
+           -1.2f, 1.5f, lo_on ? 1.0f : 0.0f,  1.1f, 1.25f, hi_on ? 1.0f : 0.0f,  1.75f};
+    return m;
+}
+
+void mask_exposure_ref(const MaskData& m, const float* c, double a[3]) {
+    double acc[3] = {0, 0, 0};
+    for (uint32_t l = 0; l < m.nl; ++l) {
+        double d = double(m.base[l]);
+        for (int k = 0; k < 3; ++k) d += double(c[k]) * m.chd[3 * l + k];
+        const double t = std::pow(10.0, -d);
+        for (int k = 0; k < 3; ++k) acc[k] += t * m.ixs[3 * l + k];
+    }
+    for (int k = 0; k < 3; ++k) a[k] = acc[k] * m.p[k];
+}
+
+double mask_x_ref(const MaskData& m, const double a[3]) {
+    double s = 0;
+    for (int c = 0; c < 3; ++c) {
+        const double r = a[c] * m.p[3 + c];
+        s += r > 0.0 ? std::max(std::log2(r), -20.0) : -20.0;
+    }
+    return s / 3.0;
+}
+
+double mask_delta_ref(const MaskData& m, double b) {
+    auto g = [](double d, double h) { return d * h / std::sqrt(h * h + d * d); };
+    double delta = 0;
+    if (m.p[11] != 0 && b < m.p[9]) { const double d = m.p[9] - b; delta = d - g(d, m.p[10]); }
+    else if (m.p[14] != 0 && b > m.p[12]) { const double d = b - m.p[12]; delta = g(d, m.p[13]) - d; }
+    const double lim = m.p[15];
+    return delta * lim / std::sqrt(lim * lim + delta * delta);
+}
+
+bool check_contrast_mask(Gpu* gpu, std::string& error) {
+    std::mt19937 rng(24);
+    std::uniform_real_distribution<float> density(0.0f, 2.5f), slope(0.0f, 1.0f), offset(-3.0f, 3.0f);
+    struct Grid { uint32_t W, H, gw, gh, row0, band; };
+    const Grid grids[] = {{64, 48, 8, 6, 0, 48}, {101, 37, 13, 5, 0, 37}, {50, 90, 7, 11, 23, 31},
+                          {5, 3, 1, 1, 0, 3}, {300, 200, 40, 27, 0, 200}};
+    for (int branches = 0; branches < 4; ++branches)
+        for (const Grid& grid : grids) {
+            const MaskData m = mask_data(rng, branches & 1, branches & 2);
+            const uint32_t count = grid.W * grid.H;
+            std::vector<float> cmy(3 * size_t(count));
+            for (auto& v : cmy) v = density(rng);
+            if (count > 3) { cmy[0] = cmy[1] = cmy[2] = 0.0f; cmy[3] = cmy[4] = cmy[5] = 40.0f; }  // clear / opaque
+            auto chd = gpu->upload(m.chd.data(), m.chd.size() * sizeof(float), error);
+            auto base = gpu->upload(m.base.data(), m.base.size() * sizeof(float), error);
+            auto ixs = gpu->upload(m.ixs.data(), m.ixs.size() * sizeof(float), error);
+            auto p = gpu->upload(m.p.data(), m.p.size() * sizeof(float), error);
+            auto in = gpu->upload(cmy.data(), cmy.size() * sizeof(float), error);
+            if (!chd || !base || !ixs || !p || !in) return false;
+
+            // The reduce, over the whole frame.
+            const uint32_t cells = grid.gw * grid.gh;
+            std::vector<double> means(cells);
+            for (uint32_t cell = 0; cell < cells; ++cell) {
+                const uint32_t cy = cell / grid.gw, cx = cell % grid.gw;
+                const uint32_t x0 = cx * grid.W / grid.gw, y0 = cy * grid.H / grid.gh;
+                const uint32_t x1 = std::min(std::max((cx + 1) * grid.W / grid.gw, x0 + 1), grid.W);
+                const uint32_t y1 = std::min(std::max((cy + 1) * grid.H / grid.gh, y0 + 1), grid.H);
+                double acc = 0;
+                for (uint32_t y = y0; y < y1; ++y)
+                    for (uint32_t x = x0; x < x1; ++x) {
+                        double a[3];
+                        mask_exposure_ref(m, &cmy[3 * size_t(y * grid.W + x)], a);
+                        acc += mask_x_ref(m, a);
+                    }
+                means[cell] = acc / double((x1 - x0) * (y1 - y0));
+            }
+            auto reduced = output_buffer(gpu, cells, error);
+            const uint32_t reduce_meta[5] = {grid.W, grid.H, grid.gw, grid.gh, m.nl};
+            if (!reduced ||
+                !gpu->dispatch("spk_mask_reduce", {Arg::buf(in), Arg::buf(chd), Arg::buf(base), Arg::buf(ixs),
+                                   Arg::buf(p), Arg::inline_bytes(reduce_meta, 5), Arg::buf(reduced)},
+                               cells, error) ||
+                // x is a mean of log2s of float spectral sums: ~1e-6 per pixel.
+                !check_values(gpu, reduced, means, "mask_reduce", 2e-5, 1e-6, error)) return false;
+
+            // The epilogue, over a band of the frame read at the frame's rows.
+            std::vector<float> coefficients(2 * size_t(cells));
+            for (uint32_t cell = 0; cell < cells; ++cell) {
+                coefficients[2 * cell] = slope(rng);
+                coefficients[2 * cell + 1] = offset(rng);
+            }
+            auto coef = gpu->upload(coefficients.data(), coefficients.size() * sizeof(float), error);
+            const uint32_t n = grid.W * grid.band;
+            const float* band = &cmy[3 * size_t(grid.row0) * grid.W];
+            auto band_in = gpu->upload(band, 3 * size_t(n) * sizeof(float), error);
+            std::vector<double> expected(3 * size_t(n));
+            for (uint32_t i = 0; i < n; ++i) {
+                double a[3];
+                mask_exposure_ref(m, band + 3 * size_t(i), a);
+                const uint32_t px = i % grid.W, py = grid.row0 + i / grid.W;
+                // The grid coordinate in float, as the kernel computes it.
+                const float u = std::clamp((float(px) + 0.5f) * float(grid.gw) / float(grid.W) - 0.5f,
+                                           0.0f, float(grid.gw - 1));
+                const float v = std::clamp((float(py) + 0.5f) * float(grid.gh) / float(grid.H) - 0.5f,
+                                           0.0f, float(grid.gh - 1));
+                const uint32_t u0 = uint32_t(std::floor(u)), v0 = uint32_t(std::floor(v));
+                const uint32_t u1 = std::min(u0 + 1, grid.gw - 1), v1 = std::min(v0 + 1, grid.gh - 1);
+                const double tu = u - float(u0), tv = v - float(v0);
+                double ab[2];
+                for (int k = 0; k < 2; ++k) {
+                    auto c = [&](uint32_t row, uint32_t col) { return double(coefficients[2 * (row * grid.gw + col) + k]); };
+                    const double top = c(v0, u0) + (c(v0, u1) - c(v0, u0)) * tu;
+                    const double bottom = c(v1, u0) + (c(v1, u1) - c(v1, u0)) * tu;
+                    ab[k] = top + (bottom - top) * tv;
+                }
+                const double gain = std::exp2(mask_delta_ref(m, ab[0] * mask_x_ref(m, a) + ab[1]));
+                for (int c = 0; c < 3; ++c)
+                    expected[3 * size_t(i) + c] = std::log10(std::max(gain * a[c] + m.p[6 + c], 0.0) + 1e-10);
+            }
+            auto out = output_buffer(gpu, 3 * size_t(n), error);
+            const uint32_t meta[7] = {n, m.nl, grid.W, grid.H, grid.row0, grid.gw, grid.gh};
+            if (!coef || !band_in || !out ||
+                !gpu->dispatch("spk_mask_epilogue", {Arg::buf(band_in), Arg::buf(chd), Arg::buf(base),
+                                   Arg::buf(ixs), Arg::buf(p), Arg::buf(coef), Arg::inline_bytes(meta, 7),
+                                   Arg::buf(out)}, n, error) ||
+                // log10 of an 81-term float spectral sum, scaled by a gain that
+                // went through log2 -> the curve -> exp2: 3.04e-6 measured worst
+                // over these cases. 1e-5 in log10 is 2.3e-5 relative exposure,
+                // under the engine's whole-image parity bar (3e-5 of full scale).
+                !check_values(gpu, out, expected, "mask_epilogue", 1e-5, 0.0, error)) return false;
+        }
+    return true;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -256,7 +400,8 @@ int main(int argc, char** argv) {
     std::unique_ptr<Gpu> gpu(Gpu::create_vulkan(std::string(argv[1]) + "/vulkan", error));
     if (!gpu) { std::fprintf(stderr, "Vulkan device: %s\n", error.c_str()); return 1; }
     std::printf("Vulkan device: %s\n", gpu->device_name().c_str());
-    if (!check_di_encode(gpu.get(), error) || !check_scene_latitude(gpu.get(), error)) {
+    if (!check_di_encode(gpu.get(), error) || !check_scene_latitude(gpu.get(), error) ||
+        !check_contrast_mask(gpu.get(), error)) {
         std::fprintf(stderr, "features: %s\n", error.c_str());
         return 1;
     }

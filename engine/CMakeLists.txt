@@ -45,11 +45,11 @@ add_library(spektralab_pipeline OBJECT
     src/pipeline/engine.cpp
     src/pipeline/pipeline.cpp
     src/pipeline/scene_latitude.cpp
+    src/pipeline/contrast_mask.cpp
 )
 set_target_properties(spektralab_pipeline PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(APPLE)
-    target_sources(spektralab_pipeline PRIVATE
-        src/pipeline/contrast_mask.cpp src/pipeline/overscan.cpp)
+    target_sources(spektralab_pipeline PRIVATE src/pipeline/overscan.cpp)
 else()
     target_sources(spektralab_pipeline PRIVATE src/pipeline/windows_unported.cpp)
 endif()
@@ -115,7 +115,7 @@ if(NOT APPLE)
             spk_reduce_max spk_boost spk_bw_correct spk_edr spk_cctf_decode
             spk_zoom_bilinear_mirror spk_geometry_resample_df
             spk_lut3d_trilinear spk_di_normalise spk_di_encode
-            spk_scene_latitude
+            spk_scene_latitude spk_mask_reduce spk_mask_epilogue
             CACHE INTERNAL "")
         set(vulkan_spirv)
         file(GLOB vulkan_includes "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/vulkan/*.glsl")

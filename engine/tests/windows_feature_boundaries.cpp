@@ -4,6 +4,8 @@
 #include "spektrafilm/spk_engine.h"
 
 #include <array>
+#include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -147,6 +149,57 @@ int main(int argc, char** argv) {
         require(latitude_status == SPK_OK && latitude_valid, "latitude analysis failed: " + latitude_error);
         require(params(session.get()) == before, "latitude analysis mutated the session");
         render(engine.get(), session.get());
+        // A ported effect must change the picture, not just be accepted: a
+        // frame spanning ~9 stops, grain and glare off so two sessions are
+        // comparable, and each effect with settings that reach that range.
+        {
+            std::vector<float> ramp(64 * 32 * 3);
+            for (uint32_t y = 0; y < 32; ++y)
+                for (uint32_t x = 0; x < 64; ++x)
+                    for (uint32_t c = 0; c < 3; ++c)
+                        ramp[3 * (y * 64 + x) + c] = 0.184f * std::exp2(float(x) / 7.0f - 4.5f) *
+                                                     (c == 0 ? 1.1f : c == 2 ? 0.85f : 1.0f);
+            const spk_image wide{ramp.data(), 64, 32, 3};
+            const std::string quiet = "\"grain_active\":false,\"glare_active\":false";
+            auto pixels = [&](const std::string& extra, std::vector<uint16_t>& out) {
+                const std::string delta = "{" + quiet + extra + "}";
+                std::unique_ptr<spk_session, decltype(&spk_session_release)> s(
+                    spk_open(engine.get(), &wide, delta.c_str(), nullptr), spk_session_release);
+                require(bool(s), "open with " + delta + ": " + spk_last_error(engine.get()));
+                spk_result r{};
+                require(spk_render(s.get(), "full", &r) == SPK_OK && r.rgba16,
+                        "render with " + delta + ": " + spk_last_error(engine.get()));
+                out.assign(r.rgba16, r.rgba16 + size_t(r.row_stride_px) * r.height * 4);
+                spk_result_free(&r);
+            };
+            std::vector<uint16_t> plain;
+            pixels("", plain);
+            struct Effect { const char* capability; const char* delta; };
+            const Effect effects[] = {
+                {"scene_latitude_mapping",
+                 ",\"scene_latitude_active\":true,\"scene_latitude_highlight_knee\":0.5,"
+                 "\"scene_latitude_highlight_room\":1.5,\"scene_latitude_shadow_knee\":-0.5,"
+                 "\"scene_latitude_shadow_room\":1.5"},
+                {"contrast_mask",
+                 ",\"contrast_mask_active\":true,\"contrast_mask_highlights\":2.0,"
+                 "\"contrast_mask_shadows\":2.0"},
+                {"digital_intermediate", ",\"digital_intermediate\":true"},
+            };
+            for (const Effect& effect : effects) {
+                if (listed(effect.capability)) continue;
+                std::vector<uint16_t> with;
+                pixels(effect.delta, with);
+                size_t moved = 0;
+                for (size_t i = 0; i < std::min(plain.size(), with.size()); ++i)
+                    moved += std::abs(int(plain[i]) - int(with[i])) > 64;
+                require(plain.size() != with.size() || moved > plain.size() / 20,
+                        std::string(effect.capability) + " did not change the picture (" +
+                        std::to_string(moved) + " samples moved)");
+                std::cout << effect.capability << ": " << moved << " of " << plain.size()
+                          << " samples moved\n";
+            }
+        }
+
         std::cout << "Windows feature boundaries passed (" << ported << " of 5 effects ported and rendered, "
                   << 5 - ported << " refused; DI API, mask off, latitude analysis)\n";
         return 0;
