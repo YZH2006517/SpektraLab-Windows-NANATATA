@@ -4,7 +4,7 @@
 
 ## 📥 下载
 
-### 👉 [点这里下载安装包 SpektraLab_1.3.1_x64-setup.exe](https://github.com/YZH2006517/SpektraLab-Windows/releases/download/windows-v1.3.1/SpektraLab_1.3.1_x64-setup.exe)
+### 👉 [点这里下载安装包 SpektraLab_1.3.1_x64-setup.exe](https://github.com/YZH2006517/SpektraLab-Windows-NANATATA/releases/download/windows-v1.3.1/SpektraLab_1.3.1_x64-setup.exe)
 
 下载后双击安装，然后在桌面或开始菜单打开 **SpektraLab**。
 
