@@ -39,8 +39,13 @@ parity remains unverified.
 | Minimal Win32 viewer | Serial worker and immutable RGBA16/BGRA8 frames | Full RAW open, film/paper/brightness edits, fit/100% pan, same-frame export and failed-open preservation |
 | Qt Quick editor | Shared native host, three-panel layout and single-photo strip | Full RAW/controller/offscreen scene regression; physical 100% samples, repeated texture updates and failure recovery; live display validation pending |
 | Window drawing | sRGB-labelled bitmap and requested GDI ICM | Offscreen handlers/layout and 1:1 BGR pixel checks; visible gestures, calibrated monitor ICC, HDR and multi-monitor acceptance remain pending |
-| Scene latitude analysis | Existing pipeline and explicit probe readback | Real C ABI analysis test; applying scene latitude mapping remains unsupported |
-| New upstream effects | Explicit Windows capability and request rejection | Cineon DI, scene latitude mapping, contrast mask, film edge and date imprint are refused before session mutation; the old normalised-density DI tap remains available |
+| Scene latitude analysis | Existing pipeline and explicit probe readback | Real C ABI analysis test |
+| Scene latitude mapping | `spk_scene_latitude` | 36 kernel cases vs `slm::delta`; strips byte-equal to whole (`strip_effects.py`); renders and moves the picture (`windows_feature_boundaries`) |
+| Contrast mask | `spk_mask_reduce`, `spk_mask_epilogue`, threaded `for_each_line` | 40 kernel cases vs float64; strips byte-equal to whole |
+| Cineon DI | `spk_di_encode`; host `export_cineon_di` | 12 kernel cases; `spk_render_digital_intermediate` returns a Cineon frame; host smoke writes the TIFF |
+| Film edge (overscan) and date back | four overscan kernels; `edge_raster.cpp` for CoreGraphics/CoreText/vImage; bundled fonts | `overscan_checks.py` 144/144 (edge print metrics within the film's measured ranges); host smoke; visual check of 135, 120 and the date. Glyph shapes are TeX Gyre Heros, not Helvetica Neue |
+| Half-frame pair | host `open_pair` (PairComposer's layout, each hole metered alone) | host smoke: holes 18 x 24, meters 4.00 stops apart for frames 4 stops apart, gap unexposed, two gates on the strip |
+| Highlight headroom (no-AH films) | `spk_highlight_headroom` | 5 kernel cases vs float64 |
 
 ## Test interpretation
 

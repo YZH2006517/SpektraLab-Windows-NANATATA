@@ -1,6 +1,10 @@
 # Porting the five refused features to Vulkan -- a handoff
 
-**Status (owner's decision, 2026-10-06):** contrast mask, scene latitude
+**Status (2026-10-28): all five are ported** -- see "What landed" at the end.
+The owner's decision of 2026-10-06 kept them refused off Apple; what follows
+is the handoff as it was written, kept because it says what each touches.
+
+**As it was (owner's decision, 2026-10-06):** contrast mask, scene latitude
 mapping, Cineon Digital Intermediate, overscan/film edge and the date back
 stay **refused** off Apple. `capabilities.backend.unsupported_features` lists
 them, a request that turns one on fails with `SPK_ERR_USER` before the session
@@ -123,3 +127,25 @@ fields are ordinary `set_params` deltas, `overscan_geometry` and
 `scene_latitude` are already forwarded, and the error a refused feature
 returns today (`bad_request`, message "... is not implemented by the Windows
 Vulkan backend yet") simply stops happening.
+
+## What landed (2026-10-28, branch `windows-port-features`)
+
+In the plan's order, each refusal removed in the commit whose tests pass
+(`src/pipeline/windows_unported.hpp` switches; `unsupported_features` is
+derived from them and is now empty):
+
+| Feature | Kernels | Host C++ | Gate |
+|---|---|---|---|
+| Cineon DI | `spk_di_encode.comp` | none (already portable) | 12 cases vs float64, max 3.1e-5 (a float32 CPU transcription of the Metal kernel: 4.06e-5) |
+| Scene latitude | `spk_scene_latitude.comp` | none | 36 cases vs the engine's own `slm::delta` (norms x roll-offs x split layouts) |
+| Contrast mask | `spk_mask_reduce/epilogue.comp`, `spk_mask_common.glsl` | `for_each_line` over `std::thread` off Apple | 40 cases vs float64, incl. a band at frame rows |
+| Overscan / film edge | `spk_overscan_canvas/add_mask/film_present/light.comp`, `spk_overscan_common.glsl` | `edge_raster.cpp`: exact-area rasteriser for CG, stb_truetype for CoreText, threaded separable blur for vImage; fonts in `resources/fonts` (TeX Gyre Heros / Heros Cn, DejaVu Sans Mono Bold) | `overscan_checks.py` 144/144 on the Vulkan DLL |
+| Date back | (overscan's) | (overscan's) | as above, every placement and format |
+
+Also: `spk_highlight_headroom.comp` -- the halation of a film without an AH
+layer ran it, and it had no Vulkan port at all. `tests/strip_effects.py`
+checks latitude and the mask in strips (byte-equal to the whole frame).
+
+Not done: whole-image parity against Mac dumps (no Mac here), and per-kernel
+float64 gates for the four overscan kernels (they are pinned functionally by
+`overscan_checks.py` and by eye).
