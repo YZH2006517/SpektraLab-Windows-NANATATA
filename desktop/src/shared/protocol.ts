@@ -149,6 +149,10 @@ export interface OpenResult {
   metadata: FileMetadata;
   params: WireParams;
   timings_ms?: { decode?: number; open?: number };
+  /** `open_pair`: the second frame's metadata, each hole's meter, the piece's layout. */
+  metadata_b?: FileMetadata | null;
+  metered_ev?: (number | null)[];
+  layout?: { hole_w: number; hole_h: number; advance: number; turned: boolean };
 }
 
 export type Tier = 'live' | 'preview' | 'full';

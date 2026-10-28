@@ -93,6 +93,10 @@ export class Host {
   async open(path: string, params: WireParams, decode?: object | null): Promise<OpenResult> {
     return (await this.call<OpenResult>('open', decode ? { path, params, decode } : { path, params }, 300_000)).result;
   }
+  /** A half-frame pair composed by the host (HOST-PROTOCOL.md `open_pair`). */
+  async openPair(request: object, params: WireParams): Promise<OpenResult> {
+    return (await this.call<OpenResult>('open_pair', { ...request, params }, 300_000)).result;
+  }
   /** Decode the session's file again with other decode settings; params are kept (R2). */
   async redecode(session: string, decode: object): Promise<OpenResult> {
     return (await this.call<OpenResult>('redecode', { session, decode }, 300_000)).result;

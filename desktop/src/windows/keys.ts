@@ -8,7 +8,7 @@
 // characters, arrows and delete to a focused editable element. Ctrl/Alt
 // combinations and Return/Enter/Esc/Tab are not typing keys.
 
-import { setGeometry, selectRelative, setOriginal, setTool, toggleCompare, undo, redo, zoomStep, zoomTo, zoomToFit, currentFitZoom, copySettings, pasteSettings, selectAllFrames, sessionStore, setPages } from '../state/session';
+import { makePair, setGeometry, selectRelative, setOriginal, setTool, toggleCompare, undo, redo, zoomStep, zoomTo, zoomToFit, currentFitZoom, copySettings, pasteSettings, selectAllFrames, sessionStore, setPages } from '../state/session';
 import { turned } from '@shared/geometry';
 import { openDialog, openExport, restartHost } from './actions';
 import { settingsStore } from '../state/settings';
@@ -58,6 +58,7 @@ export function shortcutTable(): Record<string, Action> {
     'ctrl+shift+c': copySettings,
     'ctrl+shift+v': () => void pasteSettings(),
     'ctrl+a': selectAllFrames,
+    'ctrl+j': () => void makePair(),
     'ctrl+=': () => zoomStep(1, currentFitZoom),
     'ctrl++': () => zoomStep(1, currentFitZoom),
     'ctrl+-': () => zoomStep(-1, currentFitZoom),

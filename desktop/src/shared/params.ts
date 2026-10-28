@@ -575,6 +575,7 @@ export function wire(p: FilmParams, gate: FeatureGate = ALL_FEATURES, cut: Engin
         { name: 'overscan_leaks', value: clamp(fe.leaks, 0, 4), layer: 'shoot' },
         { name: 'overscan_edge_text', value: fe.edgeText, layer: 'shoot' },
         { name: 'overscan_f_number', value: clamp(fe.fNumber, 0, 64), layer: 'shoot' },
+        { name: 'overscan_pair', value: fe.pair, layer: 'shoot' },
       );
     }
   }
@@ -595,6 +596,7 @@ export function wire(p: FilmParams, gate: FeatureGate = ALL_FEATURES, cut: Engin
         { name: 'date_imprint_size', value: clamp(d.size, 0.4, 3), layer: 'shoot' },
         { name: 'date_imprint_ev', value: clamp(d.brightnessEV, -2, 8), layer: 'shoot' },
         { name: 'date_imprint_data_text', value: d.withData ? d.dataText : '', layer: 'shoot' },
+        { name: 'date_imprint_text_b', value: d.textB, layer: 'shoot' },
       );
     }
   }

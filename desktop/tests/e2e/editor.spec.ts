@@ -71,3 +71,30 @@ test('the export page names the file and holds the frame while it runs', async (
   await expect.poll(() => state(page, 's.batchExporting')).toBe(false);
   await expect(page.getByTestId('export-page')).toContainText('DSC_0001');
 });
+
+test('the film edge holds the crop at the gate and gives it back', async ({ page }) => {
+  await openRoll(page);
+  await page.getByTestId('film-edge-toggle').click();
+  await expect.poll(() => state(page, 's.sidecar.params.filmEdge.active')).toBe(true);
+  // The decode is 1800 x 1200: the crop is held at 135's 36 x 24, and the
+  // canvas applies no geometry of its own while the engine cuts the frame.
+  expect(await state(page, 's.sidecar.geometry.lockedRatio')).toBeCloseTo(1.5, 6);
+  await page.getByTestId('film-edge-format').click();
+  await page.getByRole('menuitem', { name: '6x7' }).click();
+  await expect.poll(() => state(page, 's.sidecar.geometry.lockedRatio')).toBeCloseTo(69.5 / 56, 6);
+  await expect(page.getByTestId('left-rail')).toContainText('from the stock');
+  await page.getByTestId('film-edge-toggle').click();
+  await expect.poll(() => state(page, 's.sidecar.geometry.lockedRatio ?? null')).toBe(null);
+});
+
+test('two picked photos become a half-frame pair', async ({ page }) => {
+  await openRoll(page);
+  await page.locator('.thumb').nth(1).click({ modifiers: ['Control'] });
+  await page.keyboard.press('Control+j');
+  await expect.poll(() => state(page, 's.pair && s.pair.right && s.pair.right.path.split(/[\\/]/).pop()')).toBe('DSC_0002.NEF');
+  await expect(page.locator('.thumb')).toHaveCount(9);
+  await expect(page.getByTestId('left-rail')).toContainText('Half-Frame Pair');
+  await expect.poll(() => state(page, 's.nativeSize && s.nativeSize.width > s.nativeSize.height')).toBe(true);
+  await page.getByRole('switch', { name: 'Camera turned' }).click();
+  await expect.poll(() => state(page, 's.nativeSize && s.nativeSize.height > s.nativeSize.width'), { timeout: 10_000 }).toBe(true);
+});

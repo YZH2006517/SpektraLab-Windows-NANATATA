@@ -37,7 +37,8 @@ import {
   clamp,
 } from '@shared/params';
 import { type Adjustments, ADJUSTMENTS_DEFAULT } from '@shared/adjustments';
-import { resolvedFilmEdge } from '@shared/filmEdge';
+import { captureDay, formatDate, resolvedFilmEdge } from '@shared/filmEdge';
+import { type HalfFramePair, type PairSide, PAIR_AREA, decodePair, encodePair, isPairPath, newHole, newPairName, openPairRequest, pairLabel } from '@shared/pair';
 import { type Geometry, GEOMETRY_DEFAULT, constrained, outputSize } from '@shared/geometry';
 import { type DecodeSettings, type Sidecar, decodeSidecar, encodeSidecar, newSidecar } from '@shared/sidecar';
 import { decodeWire, isRawPath, modeOf } from '@shared/whiteBalance';
@@ -89,6 +90,9 @@ export interface SessionState {
   metadata: FileMetadata | null;
   /** The open frame's kind as the host decoded it (`raw`, `tiff`, …); null until it lands. */
   frameKind: string | null;
+  /** The open frame when it is a half-frame pair, and its second frame's metadata. */
+  pair: HalfFramePair | null;
+  pairMetadataB: FileMetadata | null;
   /** A decode-setting change (white balance) is being re-decoded. */
   redecoding: boolean;
   imageVersion: number;
@@ -134,6 +138,8 @@ const INITIAL: SessionState = {
   nativeSize: null,
   metadata: null,
   frameKind: null,
+  pair: null,
+  pairMetadataB: null,
   redecoding: false,
   imageVersion: 0,
   badge: null,
@@ -204,7 +210,21 @@ export function resolvedParams(s: SessionState = get()): FilmParams {
   const n = s.nativeSize;
   const aspect = n ? Math.max(n.width, n.height) / Math.max(1, Math.min(n.width, n.height)) : 1.5;
   const p = s.sidecar.params;
-  return resolvedFilmEdge(p, s.metadata, s.catalog.stock(p.filmStock)?.name, aspect, s.gate);
+  if (!s.pair) return resolvedFilmEdge(p, s.metadata, s.catalog.stock(p.filmStock)?.name, aspect, s.gate);
+  // A pair is 135_half exposed twice on one strip, each frame with its own
+  // date (Session.resolved on the Mac); the piece is already the gate's shape.
+  const half = { ...p, filmEdge: { ...p.filmEdge, format: '135_half' } };
+  const r = resolvedFilmEdge(half, s.metadata, s.catalog.stock(p.filmStock)?.name, aspect, s.gate);
+  const dayB = captureDay(s.pairMetadataB?.datetime_original);
+  return {
+    ...r,
+    filmEdge: { ...r.filmEdge, pair: filmEdgeOn(r, s.gate) },
+    dateBack: {
+      ...r.dateBack,
+      camera: '135_half',
+      textB: r.dateBack.face === 'data' ? '' : dayB ? formatDate(dayB.year, dayB.month, dayB.day, r.dateBack.order) : '',
+    },
+  };
 }
 
 /**
@@ -214,6 +234,8 @@ export function resolvedParams(s: SessionState = get()): FilmParams {
  * develops the new framing.
  */
 export function engineCut(s: SessionState = get()): Geometry | null {
+  // A pair's picture is the whole piece, already the gate's shape.
+  if (s.pair) return null;
   return s.tool !== 'crop' && cutsFrame(s.sidecar.params, s.gate, s.sidecar.geometry) ? s.sidecar.geometry : null;
 }
 
@@ -233,6 +255,8 @@ export function canvasGeometry(s: SessionState = get()): Geometry {
  */
 let heldCrop: Geometry | null = null;
 function filmEdgeWillChange(from: FilmParams, to: FilmParams, g: Geometry): Geometry {
+  // A pair has no crop to hold: the film edge only re-lays its gap.
+  if (get().pair) return g;
   const gate = get().gate;
   const was = filmEdgeOn(from, gate);
   const now = filmEdgeOn(to, gate);
@@ -429,6 +453,12 @@ export function setParams(fn: (p: FilmParams) => FilmParams) {
     savedGeometry: s.selection && geometry !== s.sidecar.geometry ? { ...s.savedGeometry, [s.selection]: geometry } : s.savedGeometry,
   });
   scheduleSave();
+  // A pair's gap is the camera's on the strip and the user's off it: the
+  // piece is composed again (`HalfFramePair.effectiveSpacingMM`).
+  if (get().pair && filmEdgeOn(s.sidecar.params, s.gate) !== filmEdgeOn(next, s.gate)) {
+    setPair((p) => ({ ...p, onStrip: filmEdgeOn(next, get().gate) }));
+    return;
+  }
   void requestPrint();
 }
 
@@ -655,7 +685,8 @@ export async function openPaths(paths: string[]) {
   }
 }
 
-async function setLibrary(folder: string, files: FileEntry[]) {
+async function setLibrary(folder: string, photos: FileEntry[]) {
+  const files = [...photos, ...(await pairEntries(folder).catch(() => []))];
   await flushSave();
   await closeEngineSession();
   thumbs.reset();
@@ -674,6 +705,116 @@ async function setLibrary(folder: string, files: FileEntry[]) {
     for (const r of rows) if (r) g[r[0]] = r[1];
     set({ savedGeometry: { ...g, ...get().savedGeometry } });
   });
+}
+
+// -------------------------------------------------------- half-frame pairs
+//
+// HalfFramePair.swift: a pair is a file in `<app data>/Pairs`, listed in the
+// filmstrip of the folder it belongs to (`Pairs/index.json`), opened through
+// the host's `open_pair`. Its look is its own sidecar, as a frame's is.
+
+interface PairIndex {
+  pairs: { name: string; folder: string }[];
+}
+
+let pairsDir: string | null = null;
+async function pairsDirectory(): Promise<string> {
+  if (!pairsDir) pairsDir = `${(await platform().appPaths()).appData}/${PAIR_AREA}`;
+  return pairsDir;
+}
+const pairName = (path: string) => path.split(/[\\/]/).pop() ?? path;
+
+async function readIndex(): Promise<PairIndex> {
+  const v = (await platform().storeRead(PAIR_AREA, 'index.json').catch(() => null)) as PairIndex | null;
+  return v && Array.isArray(v.pairs) ? v : { pairs: [] };
+}
+
+async function loadPair(path: string): Promise<HalfFramePair | null> {
+  return decodePair(await platform().storeRead(PAIR_AREA, pairName(path)).catch(() => null));
+}
+
+/** The pairs of `folder`, as filmstrip entries. */
+async function pairEntries(folder: string): Promise<FileEntry[]> {
+  const dir = await pairsDirectory().catch(() => null);
+  if (!dir) return [];
+  const out: FileEntry[] = [];
+  for (const e of (await readIndex()).pairs) {
+    if (e.folder !== folder) continue;
+    const pair = await loadPair(`${dir}/${e.name}`);
+    if (pair) out.push({ path: `${dir}/${e.name}`, name: pairLabel(pair), size: 0, mtime_ms: 0 });
+  }
+  return out;
+}
+
+/**
+ * ⌘J on the Mac: the picked photos (one or two, frames not pairs) become a new
+ * pair after the last of them, open on the canvas with Film Edge on Half.
+ */
+export async function makePair(): Promise<void> {
+  const s = get();
+  if (s.batchExporting || !s.folder) return;
+  const photos = s.picked.filter((p) => !isPairPath(p)).slice(0, 2);
+  if (!photos.length) {
+    set({ status: tz('Pick one or two photos to make a half-frame pair.', '请选择一张或两张照片来组成半格配对。') });
+    return;
+  }
+  const dir = await pairsDirectory();
+  const index = await readIndex();
+  const name = newPairName(s.folder, index.pairs.map((p) => p.name));
+  const pair: HalfFramePair = {
+    schemaVersion: 1,
+    folder: s.folder,
+    left: newHole(photos[0]!),
+    right: photos[1] ? newHole(photos[1]) : null,
+    spacingMM: 1,
+    onStrip: false,
+    turned: false,
+  };
+  await platform().storeWrite(PAIR_AREA, name, encodePair(pair));
+  await platform().storeWrite(PAIR_AREA, 'index.json', { pairs: [...index.pairs, { name, folder: s.folder }] });
+  const path = `${dir}/${name}`;
+  // The pair's look starts as the first frame's, on half frames.
+  const first = await platform().sidecarLoad(photos[0]!).catch(() => null);
+  const look = first ? decodeSidecar(first) : newSidecar();
+  const sidecar = { ...newSidecar(), params: { ...look.params, filmEdge: { ...look.params.filmEdge, format: '135_half' } } };
+  await platform().sidecarSave(path, encodeSidecar(sidecar));
+  const entry: FileEntry = { path, name: pairLabel(pair), size: 0, mtime_ms: 0 };
+  const frames = [...get().frames];
+  const after = Math.max(...photos.map((p) => frames.findIndex((f) => f.path === p)));
+  frames.splice(after + 1, 0, entry);
+  set({ frames, picked: [path] });
+  await select(path);
+}
+
+let pairTimer: ReturnType<typeof setTimeout> | null = null;
+/** An edit of the open pair's piece: saved, and the piece composed again. */
+export function setPair(fn: (p: HalfFramePair) => HalfFramePair) {
+  const s = get();
+  if (!s.pair || !s.selection || s.batchExporting) return;
+  const next = fn(s.pair);
+  if (jsonEqual(next, s.pair)) return;
+  set({ pair: next });
+  const path = s.selection;
+  if (pairTimer) clearTimeout(pairTimer);
+  pairTimer = setTimeout(() => {
+    pairTimer = null;
+    void (async () => {
+      await platform().storeWrite(PAIR_AREA, pairName(path), encodePair(get().pair ?? next));
+      const label = pairLabel(get().pair ?? next);
+      set({ frames: get().frames.map((f) => (f.path === path ? { ...f, name: label } : f)) });
+      if (get().selection !== path) return;
+      await closeEngineSession();
+      void develop(path, ++openGen);
+    })();
+  }, 300);
+}
+
+export function swapPairHoles() {
+  setPair((p) => ({ ...p, left: p.right, right: p.left }));
+}
+
+export function setPairHole(side: PairSide, path: string | null) {
+  setPair((p) => ({ ...p, [side]: path ? (p[side]?.path === path ? p[side] : newHole(path)) : null }));
 }
 
 async function closeEngineSession() {
@@ -739,6 +880,8 @@ export async function select(path: string): Promise<void> {
   const sidecar = raw ? decodeSidecar(raw) : newSidecar();
   heldCrop = null;
   set({
+    pair: null,
+    pairMetadataB: null,
     selection: path,
     picked: get().picked.includes(path) ? get().picked : [path],
     sidecar,
@@ -780,7 +923,14 @@ async function develop(path: string, gen: number) {
     const decode = decodeWire(get().sidecar.decode, isRawPath(path));
     const cut = engineCut(get());
     let r;
-    try {
+    if (isPairPath(path)) {
+      const pair = await loadPair(path);
+      if (!pair) throw new Error(tz('The pair file cannot be read.', '无法读取配对文件。'));
+      set({ pair });
+      const sent = resolvedParams(get());
+      r = await host().openPair(openPairRequest({ ...pair, onStrip: filmEdgeOn(sent, get().gate) }), wireParams(sent, null));
+      set({ pairMetadataB: r.metadata_b ?? null });
+    } else try {
       r = await host().open(path, wireParams(params, cut), decode);
     } catch (e) {
       // A host without R2 refuses the decode key: open with the camera's own.

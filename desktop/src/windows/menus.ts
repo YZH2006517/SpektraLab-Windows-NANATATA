@@ -10,6 +10,7 @@ import { openDialog, openExport, openFilesDialog, restartHost, revealSettings } 
 import {
   copySettings,
   currentFitZoom,
+  makePair,
   pasteSettings,
   redo,
   resetAdjustments,
@@ -82,6 +83,8 @@ export async function installMenu(): Promise<void> {
       await sep(),
       await item(tz('Select All Photos', '选择全部照片'), selectAllFrames, 'CmdOrCtrl+A'),
       await item(tz('Sync Settings', '同步设置'), () => void syncSettings()),
+      await sep(),
+      await item(tz('Make Half-Frame Pair', '组成半格配对'), () => void makePair(), 'CmdOrCtrl+J'),
     ],
   });
   const view = await Submenu.new({

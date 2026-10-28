@@ -10,6 +10,10 @@ import { t, tz, useI18n } from '../i18n';
 import {
   copySettings,
   flipFilmEdgeGate,
+  makePair,
+  setPair,
+  setPairHole,
+  swapPairHoles,
   pasteSettings,
   resolvedParams,
   setGeometry,
@@ -38,6 +42,7 @@ import {
   withAspect,
 } from '@shared/geometry';
 import { clamp, filmEdgeOn } from '@shared/params';
+import { type PairSide, PAIR_SCALE_RANGE, PAIR_SPACING_RANGE, isPairPath } from '@shared/pair';
 import { useOutput } from '../canvas/output';
 import { StockList } from './StockList';
 import { unsupportedReason } from './gate';
@@ -52,6 +57,7 @@ export function LeftRail() {
         <NavigatorSection />
         <ClipboardSection />
         <FilmSection />
+        <PairSection />
         <FilmEdgeSection />
         <DateBackSection />
         <PrintSection />
@@ -256,6 +262,7 @@ function FilmEdgeSection() {
         onChange={(v) => set({ format: v })}
         testId="film-edge-format"
       />
+      {fe.format === '135_half' && !off && <MakePairRow />}
       <div className={'row' + (off ? ' disabled' : '')}>
         <span className="row-label">{tz('Framing', '取景')}</span>
         <button
@@ -336,6 +343,98 @@ function FilmEdgeSection() {
         </div>
       )}
     </Section>
+  );
+}
+
+// ---------------------------------------------------------- Half-frame pair
+//
+// PairSection.swift, reduced: which frame is in which hole, each hole's
+// exposure and the picture's place under it, the camera held level or
+// turned, and the gap. The piece is composed by the host (`open_pair`).
+
+function PairSection() {
+  const pair = useSession((s) => s.pair);
+  const frames = useSession((s) => s.frames);
+  const edgeOn = useSession((s) => filmEdgeOn(s.sidecar.params, s.gate));
+  if (!pair) return null;
+  const photos = frames.filter((f) => !isPairPath(f.path));
+  const hole = (side: PairSide) => {
+    const h = pair[side];
+    const set = (patch: Partial<NonNullable<typeof h>>) => setPair((p) => (p[side] ? { ...p, [side]: { ...p[side]!, ...patch } } : p));
+    const place = (patch: Partial<NonNullable<typeof h>['placement']>) =>
+      setPair((p) => (p[side] ? { ...p, [side]: { ...p[side]!, placement: { ...p[side]!.placement, ...patch } } } : p));
+    const label = side === 'left' ? (pair.turned ? tz('Upper frame', '上方画格') : tz('Left frame', '左侧画格')) : pair.turned ? tz('Lower frame', '下方画格') : tz('Right frame', '右侧画格');
+    return (
+      <div key={side}>
+        <PillMenu
+          label={label}
+          value={h?.path ?? ''}
+          options={[{ value: '', label: tz('Empty', '空') }, ...photos.map((f) => ({ value: f.path, label: f.name }))]}
+          onChange={(v) => setPairHole(side, v || null)}
+          testId={`pair-${side}`}
+        />
+        {h && (
+          <>
+            <ScrubSlider label={tz('Exposure', '曝光')} sublabel={tz('stops', '档')} value={h.exposureEV} range={[-3, 3]} snap={1 / 3} zero={0} format={signed(2)} onChange={(v) => set({ exposureEV: v })} />
+            <ScrubSlider label={tz('Scale', '缩放')} value={h.placement.scale} range={PAIR_SCALE_RANGE} zero={1} onChange={(v) => place({ scale: v })} />
+            <ScrubSlider label={tz('Across', '水平')} value={h.placement.x} range={[-1, 1]} zero={0} onChange={(v) => place({ x: v })} />
+            <ScrubSlider label={tz('Down', '垂直')} value={h.placement.y} range={[-1, 1]} zero={0} onChange={(v) => place({ y: v })} />
+            <div className="row">
+              <span className="row-label">{tz('Turn', '旋转')}</span>
+              <button className="icon-btn" onClick={() => place({ quarterTurns: (h.placement.quarterTurns + 3) % 4 })} aria-label={tz('Turn left', '向左旋转')}>
+                <RotateLeft />
+              </button>
+              <button className="icon-btn" onClick={() => place({ quarterTurns: (h.placement.quarterTurns + 1) % 4 })} aria-label={tz('Turn right', '向右旋转')}>
+                <RotateRight />
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+  return (
+    <Section id="pair" title={tz('Half-Frame Pair', '半格配对')}>
+      {hole('left')}
+      {hole('right')}
+      <div className="row">
+        <span className="row-label">{tz('Frames', '画格')}</span>
+        <button className="pill-menu" onClick={() => swapPairHoles()}>
+          <span>{tz('Swap', '交换')}</span>
+        </button>
+      </div>
+      <ToggleRow label={tz('Camera turned', '相机竖握')} sublabel={tz('one above the other', '上下排列')} on={pair.turned} onChange={(v) => setPair((p) => ({ ...p, turned: v }))} />
+      <ScrubSlider
+        label={tz('Gap', '间隙')}
+        sublabel="mm"
+        value={edgeOn ? 1 : pair.spacingMM}
+        range={PAIR_SPACING_RANGE}
+        zero={1}
+        disabled={edgeOn}
+        reason={tz('On the strip the camera sets the gap (1 mm).', '在胶片条上，间隙由相机决定（1 毫米）。')}
+        onChange={(v) => setPair((p) => ({ ...p, spacingMM: v }))}
+      />
+    </Section>
+  );
+}
+
+function MakePairRow() {
+  const picked = useSession((s) => s.picked.filter((p) => !isPairPath(p)).length);
+  const isPair = useSession((s) => !!s.pair);
+  if (isPair) return null;
+  return (
+    <div className={'row' + (picked ? '' : ' disabled')}>
+      <span className="row-label">{tz('Half-frame pair', '半格配对')}</span>
+      <button
+        className="pill-menu"
+        disabled={!picked}
+        onClick={() => void makePair()}
+        title={tz('Two picked photos on one frame of 135 (Ctrl+J)', '把选中的两张照片放到同一格 135 胶片上（Ctrl+J）')}
+        data-testid="make-pair"
+      >
+        <span>{tz('Make pair', '组成配对')}</span>
+      </button>
+    </div>
   );
 }
 

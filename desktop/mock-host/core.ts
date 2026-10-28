@@ -137,7 +137,7 @@ interface Session {
 /** What `hello.methods` lists: every method `dispatch` answers. */
 const METHODS = [
   'hello', 'ping', 'shutdown', 'cancel', 'params_schema', 'print_lut_catalog', 'memory_report', 'probe', 'thumbnail',
-  'open', 'redecode', 'close', 'set_params', 'get_params', 'solve', 'render', 'scene_latitude', 'overscan_geometry',
+  'open', 'open_pair', 'redecode', 'close', 'set_params', 'get_params', 'solve', 'render', 'scene_latitude', 'overscan_geometry',
   'preview_stock_lut', 'progress', 'export_image', 'export_cube', 'export_di', 'export_cineon_di',
 ];
 
@@ -310,6 +310,42 @@ export class MockHost {
           },
         };
       }
+      case 'open_pair': {
+        // The piece as the host lays it out: two 18 x 24 holes one advance apart.
+        const holes = (Array.isArray(p.holes) ? p.holes : []) as ({ path?: string } | null)[];
+        const first = holes.find((h) => h && h.path);
+        if (!first?.path) throw new HostError('bad_request', 'open_pair: no frame in either hole');
+        const params: Record<string, Value> = {};
+        for (const f of FIELDS) params[f.name] = defaultFor(f);
+        const incoming = (p.params ?? {}) as Record<string, unknown>;
+        this.validate(incoming);
+        Object.assign(params, incoming, { auto_exposure: false });
+        const across = 1200;
+        const along = Math.round((across * 18) / 24);
+        const spacing = Number(p.spacing_mm ?? 1);
+        const advance = Math.round((along * (18 + spacing)) / 18);
+        const turned = p.turned === true;
+        const width = turned ? across : advance + along;
+        const height = turned ? advance + along : across;
+        const id = 's' + this.next++;
+        const path = `pair:${holes.map((h) => h?.path ?? '').join('|')}`;
+        this.sessions.set(id, { id, path, width, height, params, seed: hash(path) });
+        const second = holes[1]?.path;
+        return {
+          result: {
+            session: id,
+            width,
+            height,
+            kind: 'pair',
+            metadata: this.metadata(first.path),
+            metadata_b: second ? this.metadata(second) : null,
+            metered_ev: holes.map((h) => (h ? 0 : null)),
+            layout: { hole_w: turned ? across : along, hole_h: turned ? along : across, advance, turned },
+            params,
+            timings_ms: { decode: 24, open: 3 },
+          },
+        };
+      }
       case 'redecode': {
         const s = this.session(p);
         this.checkDecode(s.path, p.decode);
@@ -375,7 +411,7 @@ export class MockHost {
       case 'scene_latitude':
         return { result: latitude(this.session(p), (p.request ?? {}) as Record<string, unknown>) };
       case 'overscan_geometry':
-        throw new HostError('unsupported', 'overscan is not available on this host');
+        return { result: { valid: false } };
       case 'preview_stock_lut': {
         const w = 64, h = 64;
         return { result: { image: imageInfo(w, h) }, payload: paint(w, h, hash(String(p.print_stock)), null) };
@@ -426,7 +462,7 @@ export class MockHost {
           overscan_active: 'overscan',
           date_imprint_active: 'date_imprint',
         };
-        if (gate[k]) throw new HostError('unsupported', `${gate[k]} is not available on this host`);
+        if (gate[k] && UNSUPPORTED_ON_PORT.includes(gate[k])) throw new HostError('unsupported', `${gate[k]} is not available on this host`);
       }
     }
   }
