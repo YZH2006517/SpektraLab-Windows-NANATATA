@@ -1,4 +1,6 @@
-// Exercise Windows feature refusals through the exported DLL boundary.
+// Exercise the Windows feature boundary through the exported DLL: every effect
+// capabilities lists under unsupported_features must be refused cleanly, and
+// every one it does not list must actually render.
 #include "spektrafilm/spk_engine.h"
 
 #include <array>
@@ -32,6 +34,25 @@ void render(spk_engine* engine, spk_session* session) {
     require(valid, "default render failed after a refused request: " + error);
 }
 
+// Turn a ported effect on, render, and turn it off again: the render must
+// succeed with pixels, and the session must come back to where it was.
+void render_with(spk_engine* engine, spk_session* session, const std::string& key,
+                 const std::string& before) {
+    const std::string on = "{\"" + key + "\":true}";
+    require(spk_set_params(session, on.c_str(), nullptr) == SPK_OK,
+            "ported effect refused: " + key + ": " + spk_last_error(engine));
+    spk_result result{};
+    const spk_status status = spk_render(session, "full", &result);
+    const bool valid = status == SPK_OK && result.rgba16 && result.width > 0 && result.height > 0;
+    const std::string error = spk_last_error(engine);
+    spk_result_free(&result);
+    require(valid, "ported effect did not render: " + key + ": " + error);
+    const std::string off = "{\"" + key + "\":false}";
+    require(spk_set_params(session, off.c_str(), nullptr) == SPK_OK, "could not turn off " + key);
+    require(params(session) == before, "turning " + key + " off did not restore the session");
+    render(engine, session);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -53,15 +74,25 @@ int main(int argc, char** argv) {
         render(engine.get(), session.get());
         const std::string before = params(session.get());
 
-        struct Feature { const char* key; const char* label; };
+        const std::string caps(capabilities);
+        const auto listed = [&](const char* name) {
+            return caps.find(std::string("\"") + name + "\"") != std::string::npos;
+        };
+        struct Feature { const char* key; const char* capability; const char* label; };
         const std::array<Feature, 5> features{{
-            {"digital_intermediate", "digital intermediate"},
-            {"scene_latitude_active", "scene latitude mapping"},
-            {"contrast_mask_active", "contrast mask"},
-            {"overscan_active", "overscan"},
-            {"date_imprint_active", "date imprint"},
+            {"digital_intermediate", "digital_intermediate", "digital intermediate"},
+            {"scene_latitude_active", "scene_latitude_mapping", "scene latitude mapping"},
+            {"contrast_mask_active", "contrast_mask", "contrast mask"},
+            {"overscan_active", "overscan", "overscan"},
+            {"date_imprint_active", "date_imprint", "date imprint"},
         }};
+        int ported = 0;
         for (const Feature& feature : features) {
+            if (!listed(feature.capability)) {
+                render_with(engine.get(), session.get(), feature.key, before);
+                ++ported;
+                continue;
+            }
             // Include a supported change to catch partial application before
             // the unsupported field is rejected.
             const std::string delta = std::string("{\"") + feature.key +
@@ -86,12 +117,17 @@ int main(int argc, char** argv) {
         const spk_status di_status = spk_render_digital_intermediate(session.get(), &di, &di_json);
         const std::string di_error = spk_last_error(engine.get());
         const bool empty = !di.texture && !di.rgba16 && !di_json;
+        const bool cineon = di_status == SPK_OK && di.rgba16 && di.width == 32 && di.height == 16 &&
+                            di_json && std::string(di_json).find("\"cineon\"") != std::string::npos;
         spk_result_free(&di);
         spk_string_free(di_json);
-        require(di_status == SPK_ERR_USER && empty &&
-                di_error.find("digital intermediate") != std::string::npos,
-                "DI API did not return a clear refusal and empty result");
-        require(params(session.get()) == before, "DI refusal mutated the session");
+        if (listed("digital_intermediate"))
+            require(di_status == SPK_ERR_USER && empty &&
+                    di_error.find("digital intermediate") != std::string::npos,
+                    "DI API did not return a clear refusal and empty result");
+        else
+            require(cineon, "DI API did not return a Cineon frame: " + di_error);
+        require(params(session.get()) == before, "the DI API mutated the session");
         render(engine.get(), session.get());
 
         const float* mask = nullptr;
@@ -111,7 +147,8 @@ int main(int argc, char** argv) {
         require(latitude_status == SPK_OK && latitude_valid, "latitude analysis failed: " + latitude_error);
         require(params(session.get()) == before, "latitude analysis mutated the session");
         render(engine.get(), session.get());
-        std::cout << "Windows feature boundaries passed (5 flags, DI refusal, mask off, latitude analysis)\n";
+        std::cout << "Windows feature boundaries passed (" << ported << " of 5 effects ported and rendered, "
+                  << 5 - ported << " refused; DI API, mask off, latitude analysis)\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -1,0 +1,78 @@
+#version 450
+
+// RFC-028's Digital Intermediate, the last of its three passes (nodes.metal
+// spk_di_encode). In: the positive as log10 per film channel. p: [0..8] film
+// RGB -> working RGB (x @ M), [9..11] the live log10 offsets, [12..20] working
+// RGB -> Oklab LMS and [21..29] back (M @ v), [30] compensation on, [31] hue
+// rotation (deg), [32] chroma scale, [33..36] hue centre, half width, chroma
+// lo/hi, [37..39] Cineon white, codes per decade, max code, [40] the positive
+// of clear base (subtracted: the base is black), [41] Cineon's black offset.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float value[]; } input_data;
+layout(set = 0, binding = 1, std430) readonly buffer Parameters { float value[]; } p_data;
+layout(set = 0, binding = 2, std430) readonly buffer Count { uint value[]; } count_data;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float value[]; } output_data;
+
+// vulkan_gpu.cpp folds a dispatch past maxComputeWorkGroupCount[0] (65535 on
+// lavapipe and Intel) into rows of workgroups; this is the 1D index it means.
+uint spk_global_index() {
+    return gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) + gl_GlobalInvocationID.x;
+}
+
+float p(uint k) { return p_data.value[k]; }
+
+float pow10(float x) { return exp2(x * 3.321928094887362); }
+
+void main() {
+    uint i = spk_global_index();
+    if (i >= count_data.value[0]) return;
+    vec3 gain = vec3(pow10(p(9)), pow10(p(10)), pow10(p(11)));
+    precise vec3 pos = vec3(pow10(input_data.value[3u * i] + p(9)),
+                            pow10(input_data.value[3u * i + 1u] + p(10)),
+                            pow10(input_data.value[3u * i + 2u] + p(11)));
+    // The base is black: the same floor on every channel, scaled with the
+    // live gain so brightness and the filters never lift it.
+    pos -= vec3(p(40)) * gain;
+    precise vec3 lin = vec3(pos.x * p(0) + pos.y * p(3) + pos.z * p(6),
+                            pos.x * p(1) + pos.y * p(4) + pos.z * p(7),
+                            pos.x * p(2) + pos.y * p(5) + pos.z * p(8));
+    if (p(30) != 0.0) {
+        // Oklab (Ottosson 2020); the window sits on the output hue and fades
+        // out below a chroma floor, so greys and every other hue are exact.
+        precise vec3 lms = vec3(p(12) * lin.x + p(13) * lin.y + p(14) * lin.z,
+                                p(15) * lin.x + p(16) * lin.y + p(17) * lin.z,
+                                p(18) * lin.x + p(19) * lin.y + p(20) * lin.z);
+        lms = pow(max(lms, vec3(0.0)), vec3(1.0 / 3.0));
+        precise float L = 0.2104542553 * lms.x + 0.7936177850 * lms.y - 0.0040720468 * lms.z;
+        precise float a = 1.9779984951 * lms.x - 2.4285922050 * lms.y + 0.4505937099 * lms.z;
+        precise float b = 0.0259040371 * lms.x + 0.7827717662 * lms.y - 0.8086757660 * lms.z;
+        float C = sqrt(a * a + b * b);
+        // Metal's atan2(0, 0) is 0; GLSL leaves atan(0, 0) undefined.
+        float h = (a == 0.0 && b == 0.0) ? 0.0 : atan(b, a) * 57.29577951308232;
+        // Metal fmod truncates toward zero; GLSL mod floors.
+        float x = h - p(33) + 540.0;
+        float d = (x - 360.0 * trunc(x / 360.0)) - 180.0;
+        float w = abs(d) < p(34) ? 0.5 * (1.0 + cos(3.14159265358979 * d / p(34))) : 0.0;
+        float g = clamp((C - p(35)) / (p(36) - p(35)), 0.0, 1.0);
+        w *= g * g * (3.0 - 2.0 * g);
+        if (w > 0.0) {
+            float h2 = (h + w * p(31)) * 0.017453292519943295;
+            float C2 = C * (1.0 + w * (p(32) - 1.0));
+            a = C2 * cos(h2);
+            b = C2 * sin(h2);
+            precise vec3 l_ = vec3(L + 0.3963377774 * a + 0.2158037573 * b,
+                                   L - 0.1055613458 * a - 0.0638541728 * b,
+                                   L - 0.0894841775 * a - 1.2914855480 * b);
+            lms = l_ * l_ * l_;
+            lin = vec3(p(21) * lms.x + p(22) * lms.y + p(23) * lms.z,
+                       p(24) * lms.x + p(25) * lms.y + p(26) * lms.z,
+                       p(27) * lms.x + p(28) * lms.y + p(29) * lms.z);
+        }
+    }
+    // Kodak's Cineon encode with the black offset (`log_encoding_Cineon`).
+    vec3 lg = log(max(lin, vec3(0.0)) * (1.0 - p(41)) + p(41)) * 0.4342944819032518;
+    vec3 code = clamp((p(37) + p(38) * lg) / p(39), 0.0, 1.0);
+    output_data.value[3u * i] = code.x;
+    output_data.value[3u * i + 1u] = code.y;
+    output_data.value[3u * i + 2u] = code.z;
+}

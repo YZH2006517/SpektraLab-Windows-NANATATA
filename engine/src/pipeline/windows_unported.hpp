@@ -1,17 +1,45 @@
 // Explicit boundaries for effects added upstream after the first Windows port.
 // Included only by Windows call sites; macOS retains its upstream behavior.
+//
+// Each effect is refused until its kernels and host code are ported; the
+// kPorted* switches below flip one at a time, in the commit whose tests pass,
+// and the capabilities' `unsupported_features` list is derived from them so
+// it can never claim less (or more) than the engine does.
 #pragma once
+#include <vector>
+
 #include "params.hpp"
 
 namespace spk {
 
+inline constexpr bool kPortedDigitalIntermediate = true;
+inline constexpr bool kPortedSceneLatitude = false;
+inline constexpr bool kPortedContrastMask = false;
+inline constexpr bool kPortedOverscan = false;
+inline constexpr bool kPortedDateImprint = false;
+
+inline std::vector<const char*> windows_unported_features() {
+    std::vector<const char*> out;
+    if (!kPortedDigitalIntermediate) out.push_back("digital_intermediate");
+    if (!kPortedSceneLatitude) out.push_back("scene_latitude_mapping");
+    if (!kPortedContrastMask) out.push_back("contrast_mask");
+    if (!kPortedOverscan) out.push_back("overscan");
+    if (!kPortedDateImprint) out.push_back("date_imprint");
+    return out;
+}
+
 inline const char* windows_unported_error(bool di, bool latitude, bool mask,
                                          bool overscan, bool date) {
-    if (di) return "digital intermediate is not implemented by the Windows Vulkan backend yet";
-    if (latitude) return "scene latitude mapping is not implemented by the Windows Vulkan backend yet";
-    if (mask) return "contrast mask is not implemented by the Windows Vulkan backend yet";
-    if (overscan) return "overscan is not implemented by the Windows Vulkan backend yet";
-    if (date) return "date imprint is not implemented by the Windows Vulkan backend yet";
+    if (di && !kPortedDigitalIntermediate)
+        return "digital intermediate is not implemented by the Windows Vulkan backend yet";
+    if (latitude && !kPortedSceneLatitude)
+        return "scene latitude mapping is not implemented by the Windows Vulkan backend yet";
+    if (mask && !kPortedContrastMask)
+        return "contrast mask is not implemented by the Windows Vulkan backend yet";
+    if (overscan && !kPortedOverscan)
+        return "overscan is not implemented by the Windows Vulkan backend yet";
+    if (date && !kPortedDateImprint)
+        return "date imprint is not implemented by the Windows Vulkan backend yet";
     return nullptr;
 }
 
