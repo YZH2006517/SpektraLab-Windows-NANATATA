@@ -12,7 +12,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Checkbox, NumberField, PillMenu, ScrubSlider, Section } from '../controls/controls';
 import { t, tz } from '../i18n';
 import { platform, baseName } from '../platform';
-import { select, sessionStore, setPages, useSession } from '../state/session';
+import { canvasGeometry, canvasSource, select, sessionStore, setPages, useCanvasGeometry, useCanvasSource, useSession } from '../state/session';
 import { Thumb } from '../windows/Filmstrip';
 import { GEOMETRY_DEFAULT } from '@shared/geometry';
 import { useOutput } from '../canvas/output';
@@ -63,9 +63,9 @@ export function ExportPage() {
   const catalog = useSession((s) => s.catalog);
   const hello = useSession((s) => s.hello);
   const params = useSession((s) => s.sidecar.params);
-  const geometry = useSession((s) => s.sidecar.geometry);
+  const geometry = useCanvasGeometry();
   const adjustments = useSession((s) => s.sidecar.adjustments);
-  const native = useSession((s) => s.nativeSize);
+  const native = useCanvasSource();
   const saved = useSession((s) => s.savedGeometry);
   const output = useOutput();
   const [recipes, setRecipes] = useState<ExportRecipe[]>(DEFAULT_RECIPES);
@@ -129,8 +129,9 @@ export function ExportPage() {
             session: s.engineSession,
             params: s.sidecar.params,
             adjustments: s.sidecar.adjustments,
-            geometry: s.sidecar.geometry,
-            native: s.nativeSize,
+            // The film canvas is already cut by the engine.
+            geometry: canvasGeometry(s),
+            native: canvasSource(s) ?? s.nativeSize,
             dateTaken: s.metadata?.datetime_original,
           },
           s.catalog,

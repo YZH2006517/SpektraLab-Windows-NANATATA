@@ -4,16 +4,20 @@
 // draw).
 
 import { useEffect, useRef } from 'react';
-import { ScrubSlider, Section, ToggleRow, PillMenu, Checkbox, signed } from '../controls/controls';
+import { ScrubSlider, Section, ToggleRow, PillMenu, Checkbox, NumberField, TextRow, signed } from '../controls/controls';
 import { FlipH, FlipV, RotateLeft, RotateRight } from '../controls/icons';
 import { t, tz, useI18n } from '../i18n';
 import {
   copySettings,
+  flipFilmEdgeGate,
   pasteSettings,
+  resolvedParams,
   setGeometry,
   setPages,
   setParams,
   syncSettings,
+  useCanvasGeometry,
+  useCanvasSource,
   useSession,
   zoomToFit,
   sessionStore,
@@ -33,7 +37,7 @@ import {
   turned,
   withAspect,
 } from '@shared/geometry';
-import { clamp } from '@shared/params';
+import { clamp, filmEdgeOn } from '@shared/params';
 import { useOutput } from '../canvas/output';
 import { StockList } from './StockList';
 import { unsupportedReason } from './gate';
@@ -64,8 +68,8 @@ function NavigatorSection() {
   const out = useOutput();
   const view = useSession((s) => s.view);
   const canvasPx = useSession((s) => s.canvasPx);
-  const native = useSession((s) => s.nativeSize);
-  const geometry = useSession((s) => s.sidecar.geometry);
+  const native = useCanvasSource();
+  const geometry = useCanvasGeometry();
   const o = native ? outputSize(geometry, native) : null;
   // The part of the output the canvas shows, in output uv.
   const vis =
@@ -207,32 +211,130 @@ function FilmSection() {
   );
 }
 
-// ------------------------------------------------- Film Edge, Date Back (stubs)
+// ------------------------------------------------------- Film Edge, Date Back
+//
+// FilmEdgeSection.swift / DateBackSection.swift. Turning the film edge on
+// holds the crop at the gate's shape and hands the engine the frame cut by it
+// (`session.ts` engineCut); the stock's edge print, the f-number and the date
+// are filled in from the stock and the EXIF (`resolvedParams`).
+
+const EDGE_FORMATS: { value: string; group: 'edgeGroup135' | 'edgeGroup120' | 'edgeGroupPanoramic' }[] = [
+  { value: '135', group: 'edgeGroup135' },
+  { value: '135_half', group: 'edgeGroup135' },
+  { value: '120_645', group: 'edgeGroup120' },
+  { value: '120_6x6', group: 'edgeGroup120' },
+  { value: '120_6x7', group: 'edgeGroup120' },
+  { value: '120_6x8', group: 'edgeGroup120' },
+  { value: '120_6x9', group: 'edgeGroup120' },
+  { value: '135_xpan', group: 'edgeGroupPanoramic' },
+  { value: '120_6x12', group: 'edgeGroupPanoramic' },
+  { value: '120_6x17', group: 'edgeGroupPanoramic' },
+];
+
+function edgeFormatLabel(v: string): string {
+  if (v === '135_half') return t('edgeFormatHalf');
+  if (v === '135_xpan') return 'XPan';
+  if (v === '120_645') return '645';
+  return v.replace('120_', '');
+}
 
 function FilmEdgeSection() {
   const gate = useSession((s) => s.gate);
   const fe = useSession((s) => s.sidecar.params.filmEdge);
+  const printed = useSession((s) => resolvedParams(s).filmEdge.edgeText);
   const reason = unsupportedReason('overscan', gate.overscan);
+  const set = (patch: Partial<typeof fe>) => setParams((p) => ({ ...p, filmEdge: { ...p.filmEdge, ...patch } }));
+  const off = !fe.active || !gate.overscan;
   return (
     <Section id="filmEdge" title={t('sectionFilmEdge')} unsupported={reason}>
-      <ToggleRow label={t('sectionFilmEdge')} on={fe.active} onChange={(v) => setParams((p) => ({ ...p, filmEdge: { ...p.filmEdge, active: v } }))} />
+      <ToggleRow label={t('sectionFilmEdge')} on={fe.active} onChange={(v) => set({ active: v })} testId="film-edge-toggle" />
       <PillMenu
         label={t('edgeFormat')}
         value={fe.format}
-        options={['135', '135_half', '135_xpan', '120_645', '120_6x6', '120_6x7', '120_6x8', '120_6x9', '120_6x12', '120_6x17'].map((v) => ({ value: v, label: v.replace('_', ' ') }))}
-        onChange={(v) => setParams((p) => ({ ...p, filmEdge: { ...p.filmEdge, format: v } }))}
+        disabled={off}
+        options={EDGE_FORMATS.map((f) => ({ value: f.value, label: edgeFormatLabel(f.value), group: t(f.group) }))}
+        onChange={(v) => set({ format: v })}
+        testId="film-edge-format"
       />
+      <div className={'row' + (off ? ' disabled' : '')}>
+        <span className="row-label">{tz('Framing', '取景')}</span>
+        <button
+          className="pill-menu"
+          disabled={off}
+          onClick={() => flipFilmEdgeGate()}
+          title={tz('The gate on its side or upright, without turning the picture', '横放或竖放片门，不转动画面')}
+        >
+          <span>{tz('Turn the gate', '转动片门')}</span>
+        </button>
+      </div>
       <PillMenu
         label={t('edgeView')}
         value={fe.view}
+        disabled={off}
         options={[
           { value: 'strip', label: t('edgeViewStrip') },
           { value: 'filed', label: t('edgeViewFiled') },
         ]}
-        onChange={(v) => setParams((p) => ({ ...p, filmEdge: { ...p.filmEdge, view: v } }))}
+        onChange={(v) => set({ view: v })}
       />
-      <ScrubSlider label={t('edgeFog')} value={fe.fog} range={[0, 4]} zero={1} onChange={(v) => setParams((p) => ({ ...p, filmEdge: { ...p.filmEdge, fog: v } }))} />
-      <ScrubSlider label={t('edgeLeaks')} value={fe.leaks} range={[0, 4]} onChange={(v) => setParams((p) => ({ ...p, filmEdge: { ...p.filmEdge, leaks: v } }))} />
+      <PillMenu
+        label={t('edgeGate')}
+        value={fe.gate}
+        disabled={off}
+        options={[
+          { value: 'auto', label: t('edgeGateAuto') },
+          { value: 'square', label: t('edgeGateSquare') },
+          { value: 'rounded', label: t('edgeGateRounded') },
+          { value: 'eared', label: t('edgeGateEared') },
+          { value: 'shouldered', label: t('edgeGateShouldered') },
+          { value: 'kicked', label: t('edgeGateKicked') },
+        ]}
+        onChange={(v) => set({ gate: v })}
+      />
+      <PillMenu
+        label={t('edgeHoles')}
+        value={fe.holes}
+        disabled={off}
+        options={[
+          { value: 'white', label: t('edgeHolesWhite') },
+          { value: 'black', label: t('edgeHolesBlack') },
+        ]}
+        onChange={(v) => set({ holes: v })}
+      />
+      <div className={'row' + (off ? ' disabled' : '')}>
+        <span className="row-label">{t('edgeFrameNumber')}</span>
+        <NumberField
+          value={fe.frameNumber}
+          decimals={0}
+          disabled={off}
+          label={t('edgeFrameNumber')}
+          onCommit={(v) => set({ frameNumber: clamp(Math.round(v), 0, 99) })}
+        />
+        <span className="row-label" style={{ marginLeft: 6 }}>
+          {fe.frameNumber === 0 ? t('edgeFrameNumberAuto') : ''}
+        </span>
+      </div>
+      <div className={'row' + (off ? ' disabled' : '')}>
+        <span className="row-label">{t('edgeBody')}</span>
+        <button className="pill-menu" disabled={off} onClick={() => set({ cameraSeed: 1 + Math.floor(Math.random() * 2147483646) })}>
+          <span>{t('edgeAnother')}</span>
+        </button>
+        <button
+          className="pill-menu"
+          disabled={off}
+          style={{ marginLeft: 6 }}
+          onClick={() => set({ frameSeed: 1 + Math.floor(Math.random() * 2147483646) })}
+        >
+          <span>{t('edgeAnotherFrame')}</span>
+        </button>
+      </div>
+      <ScrubSlider label={t('edgeFog')} value={fe.fog} range={[0, 4]} zero={1} disabled={off} onChange={(v) => set({ fog: v })} />
+      <ScrubSlider label={t('edgeLeaks')} value={fe.leaks} range={[0, 4]} disabled={off} onChange={(v) => set({ leaks: v })} />
+      {!off && printed && (
+        <div className="row">
+          <span className="row-label">{tz(`Edge print ${printed}, from the stock.`, `边码 ${printed}，来自所选胶片。`)}</span>
+        </div>
+      )}
     </Section>
   );
 }
@@ -240,29 +342,81 @@ function FilmEdgeSection() {
 function DateBackSection() {
   const gate = useSession((s) => s.gate);
   const d = useSession((s) => s.sidecar.params.dateBack);
+  const edgeOn = useSession((s) => filmEdgeOn(s.sidecar.params, s.gate));
+  const fromExif = useSession((s) => resolvedParams(s).dateBack.text);
   const reason = unsupportedReason('date_imprint', gate.dateImprint);
   const set = (patch: Partial<typeof d>) => setParams((p) => ({ ...p, dateBack: { ...p.dateBack, ...patch } }));
+  const off = !d.active || !gate.dateImprint;
   return (
     <Section id="dateBack" title={t('sectionDateBack')} unsupported={reason}>
-      <ToggleRow label={t('dateImprint')} on={d.active} onChange={(v) => set({ active: v })} />
+      <ToggleRow label={t('dateImprint')} on={d.active} onChange={(v) => set({ active: v })} testId="date-back-toggle" />
       <PillMenu
         label={t('dateFace')}
         value={d.face}
+        disabled={off}
         options={[
           { value: 'lcd', label: 'LCD' },
           { value: 'dots', label: t('dateFaceDots') },
-          { value: 'data', label: t('dateFaceData') },
+          { value: 'data', label: t('dateFaceData'), disabled: !edgeOn },
         ]}
         onChange={(v) => set({ face: v })}
+      />
+      <TextRow
+        label={t('dateDate')}
+        value={d.customText ?? ''}
+        placeholder={fromExif ? `${fromExif} (${t('dateFromEXIF')})` : t('dateFromEXIF')}
+        disabled={off}
+        maxLength={22}
+        onCommit={(v) => set({ customText: v.trim() ? v : null })}
+        testId="date-back-text"
+      />
+      <PillMenu
+        label={tz('Order', '顺序')}
+        value={d.order}
+        disabled={off || d.customText != null}
+        options={[
+          { value: 'japan', label: t('dateOrderJapan') },
+          { value: 'us', label: t('dateOrderUS') },
+        ]}
+        onChange={(v) => set({ order: v })}
+      />
+      <PillMenu
+        label={t('dateWhere')}
+        value={d.placement}
+        disabled={off}
+        options={[
+          { value: 'frame', label: t('dateInFrame') },
+          { value: 'rebate', label: t('dateBetween'), disabled: !edgeOn },
+        ]}
+        onChange={(v) => set({ placement: v })}
       />
       <PillMenu
         label={t('dateCorner')}
         value={d.corner}
+        disabled={off}
         options={['br', 'bl', 'tr', 'tl'].map((v) => ({ value: v, label: v.toUpperCase() }))}
         onChange={(v) => set({ corner: v })}
       />
-      <ScrubSlider label={t('dateSize')} value={d.size} range={[0.4, 3]} zero={1} onChange={(v) => set({ size: v })} />
-      <ScrubSlider label={t('dateBrightness')} sublabel={t('dateStops')} value={d.brightnessEV} range={[-2, 8]} zero={3.5} onChange={(v) => set({ brightnessEV: v })} />
+      <ScrubSlider label={t('dateSize')} value={d.size} range={[0.4, 3]} zero={1} disabled={off} onChange={(v) => set({ size: v })} />
+      <ScrubSlider
+        label={t('dateBrightness')}
+        sublabel={t('dateStops')}
+        value={d.brightnessEV}
+        range={[-2, 8]}
+        zero={3.5}
+        disabled={off}
+        onChange={(v) => set({ brightnessEV: v })}
+      />
+      <ScrubSlider label={tz('Inset across', '水平边距')} sublabel="mm" value={d.insetXMM} range={[0, 30]} zero={3} disabled={off} onChange={(v) => set({ insetXMM: v })} />
+      <ScrubSlider label={tz('Inset down', '垂直边距')} sublabel="mm" value={d.insetYMM} range={[0, 30]} zero={2.4} disabled={off} onChange={(v) => set({ insetYMM: v })} />
+      <ToggleRow
+        label={t('dateWithData')}
+        sublabel={t('dateWithDataWhere')}
+        on={d.withData}
+        disabled={off || !edgeOn}
+        reason={t('reasonBetweenNeedsFilmEdge')}
+        onChange={(v) => set({ withData: v })}
+      />
     </Section>
   );
 }

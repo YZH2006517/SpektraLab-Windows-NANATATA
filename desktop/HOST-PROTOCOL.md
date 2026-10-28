@@ -127,6 +127,7 @@ falls back to `spk_render` and reports `reprinted: false` when the engine refuse
 | `write_image` | `{path, format, quality?, color_space, width, height, source_path?, overwrite?: false}` + rgba16 LE payload (top row first, encoded in `color_space`) | `{path, width, height, bytes, color_space, exif_copied}` (R1) |
 | `export_cube` | `{print_stock, path, overwrite?}` | `{path, size}` — the baked print LUT (`spk_print_lut_table`), domain 0..1 of normalised negative density |
 | `export_di` | `{session, print_stock?, path, overwrite?}` | `{path, width, height, bytes, di: <spk_export_di JSON>}` — 16-bit TIFF of normalised negative density, no ICC (it is not a colour space) |
+| `export_cineon_di` | `{session, path, overwrite?}` | `{path, width, height, bytes, di: {encoding: "cineon", primaries, printing_density_paper}}` — RFC-028's Digital Intermediate as the Mac exports it: the session's own negative, Cineon log in the output primaries, 16-bit TIFF, no ICC, the camera's EXIF. Refused for a slide film |
 
 Files carry EXIF (TIFF Exif IFD, JPEG APP1, PNG eXIf): Make, Model,
 LensModel, DateTimeOriginal, ExposureTime, FNumber, ISO, FocalLength, the

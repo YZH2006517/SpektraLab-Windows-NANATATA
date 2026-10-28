@@ -423,7 +423,67 @@ export function digitalIntermediateActive(p: FilmParams, filmIsPositive: boolean
  * from the Mac never makes the host refuse the whole delta; the setting itself
  * stays in the sidecar.
  */
-export function wire(p: FilmParams, gate: FeatureGate = ALL_FEATURES): WireField[] {
+/**
+ * The crop the engine's frame is cut with (`io.geometry`), or null for the
+ * whole decode. Structurally `Geometry`'s fields (geometry.ts imports this
+ * module, so it is not imported back).
+ */
+export interface EngineCut {
+  crop: { x: number; y: number; width: number; height: number };
+  angle: number;
+  quarterTurns: number;
+  flipH: boolean;
+  flipV: boolean;
+}
+
+/** The film's gate per format, mm, along x across for the camera held level
+ * (Model/FilmEdge.swift `gateMM`, the engine's table in overscan.cpp). */
+export const FILM_EDGE_GATE_MM: Record<string, [number, number]> = {
+  '135': [36, 24],
+  '135_half': [24, 18],
+  '120_645': [56, 41.5],
+  '120_6x6': [56, 56],
+  '120_6x7': [69.5, 56],
+  '120_6x8': [76, 56],
+  '120_6x9': [84, 56],
+  '135_xpan': [65, 24],
+  '120_6x12': [112, 56],
+  '120_6x17': [168, 56],
+};
+
+/** The gate's width / height for a crop of this orientation (Session+FilmEdge.swift `gateRatio`). */
+export function gateRatio(format: string, landscape: boolean): number {
+  const [long, short] = FILM_EDGE_GATE_MM[format] ?? [36, 24];
+  return landscape ? long / short : short / long;
+}
+
+export function filmEdgeOn(p: FilmParams, gate: FeatureGate = ALL_FEATURES): boolean {
+  return gate.overscan && p.filmEdge.active;
+}
+
+export function dateBackOn(p: FilmParams, gate: FeatureGate = ALL_FEATURES): boolean {
+  const d = p.dateBack;
+  return gate.dateImprint && d.active && (d.face === 'data' || d.placement === 'frame' || filmEdgeOn(p, gate));
+}
+
+function cutIsIdentity(g: EngineCut): boolean {
+  return (
+    g.crop.x === 0 && g.crop.y === 0 && g.crop.width === 1 && g.crop.height === 1 &&
+    g.angle === 0 && ((g.quarterTurns % 4) + 4) % 4 === 0 && !g.flipH && !g.flipV
+  );
+}
+
+/**
+ * Whether the engine is handed the frame cut by the crop rather than the whole
+ * decode (`FilmParams.cutsFrame` on the Mac): a film edge -- the gate is the
+ * frame the engine gets, so the crop is part of the negative -- or the date
+ * alone under a crop, a turn or a flip, so it lands in the picture's corner.
+ */
+export function cutsFrame(p: FilmParams, gate: FeatureGate, g: EngineCut): boolean {
+  return filmEdgeOn(p, gate) || (dateBackOn(p, gate) && !cutIsIdentity(g));
+}
+
+export function wire(p: FilmParams, gate: FeatureGate = ALL_FEATURES, cut: EngineCut | null = null): WireField[] {
   const di = gate.digitalIntermediate && p.digitalIntermediate;
   const placement = p.placementIsRight ? p.sceneLatitudeOther : p.sceneLatitude;
   const f: WireField[] = [
@@ -520,7 +580,7 @@ export function wire(p: FilmParams, gate: FeatureGate = ALL_FEATURES): WireField
   }
   if (gate.dateImprint) {
     const d = p.dateBack;
-    const on = d.active && (d.face === 'data' || d.placement === 'frame' || (gate.overscan && p.filmEdge.active));
+    const on = dateBackOn(p, gate);
     f.push({ name: 'date_imprint_active', value: on, layer: 'shoot' });
     if (on) {
       if (!(gate.overscan && p.filmEdge.active))
@@ -538,12 +598,27 @@ export function wire(p: FilmParams, gate: FeatureGate = ALL_FEATURES): WireField
       );
     }
   }
+  if (gate.overscan || gate.dateImprint) {
+    // The crop in the negative while the frame is cut (`cutsFrame`), the
+    // identity otherwise: the canvas then applies it after the engine.
+    const g = cut ?? { crop: { x: 0, y: 0, width: 1, height: 1 }, angle: 0, quarterTurns: 0, flipH: false, flipV: false };
+    f.push(
+      { name: 'geometry_crop_x', value: clamp(g.crop.x, 0, 1), layer: 'shoot' },
+      { name: 'geometry_crop_y', value: clamp(g.crop.y, 0, 1), layer: 'shoot' },
+      { name: 'geometry_crop_w', value: clamp(g.crop.width, 1e-4, 1), layer: 'shoot' },
+      { name: 'geometry_crop_h', value: clamp(g.crop.height, 1e-4, 1), layer: 'shoot' },
+      { name: 'geometry_rotation_deg', value: clamp(g.angle, -45, 45), layer: 'shoot' },
+      { name: 'geometry_quarter_turns', value: ((Math.round(g.quarterTurns) % 4) + 4) % 4, layer: 'shoot' },
+      { name: 'geometry_flip_h', value: g.flipH, layer: 'shoot' },
+      { name: 'geometry_flip_v', value: g.flipV, layer: 'shoot' },
+    );
+  }
   return f;
 }
 
-export function fullDelta(p: FilmParams, gate?: FeatureGate): Record<string, WireValue> {
+export function fullDelta(p: FilmParams, gate?: FeatureGate, cut: EngineCut | null = null): Record<string, WireValue> {
   const out: Record<string, WireValue> = {};
-  for (const f of wire(p, gate)) out[f.name] = f.value;
+  for (const f of wire(p, gate, cut)) out[f.name] = f.value;
   return out;
 }
 
@@ -552,11 +627,13 @@ export function delta(
   to: FilmParams,
   from: FilmParams,
   gate?: FeatureGate,
+  cutTo: EngineCut | null = null,
+  cutFrom: EngineCut | null = null,
 ): { delta: Record<string, WireValue>; layers: Set<ParamLayer> } {
-  const theirs = new Map(wire(from, gate).map((f) => [f.name, f.value]));
+  const theirs = new Map(wire(from, gate, cutFrom).map((f) => [f.name, f.value]));
   const out: Record<string, WireValue> = {};
   const layers = new Set<ParamLayer>();
-  for (const f of wire(to, gate)) {
+  for (const f of wire(to, gate, cutTo)) {
     if (theirs.get(f.name) !== f.value) {
       out[f.name] = f.value;
       layers.add(f.layer);

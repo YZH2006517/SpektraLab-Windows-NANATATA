@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { ChevronLeft, ChevronRight } from '../controls/icons';
-import { click, selectRelative, useSession } from '../state/session';
+import { click, selectRelative, useCanvasGeometry, useSession } from '../state/session';
 import { thumbs } from '../state/thumbs';
 import { type Geometry, GEOMETRY_DEFAULT } from '@shared/geometry';
 import { thumbnailGeometryPlan } from '@shared/surfaces';
@@ -18,7 +18,7 @@ export function Filmstrip() {
   const frames = useSession((s) => s.frames);
   const selection = useSession((s) => s.selection);
   const picked = useSession((s) => s.picked);
-  const live = useSession((s) => s.sidecar.geometry);
+  const live = useCanvasGeometry();
   const saved = useSession((s) => s.savedGeometry);
   const batch = useSession((s) => s.batchExporting);
   useSyncExternalStore(

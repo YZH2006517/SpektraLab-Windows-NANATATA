@@ -270,6 +270,11 @@ def extras(host, sid, path, tmp, label, raw, probe):
     out = os.path.join(tmp, f"{label}-di.tif")
     h, _ = host.call("export_di", {"session": sid, "path": out})
     check(h["ok"] and tiff_info(out) is not None, f"{label}: export_di", h.get("error"))
+    if "digital_intermediate" not in UNSUPPORTED:
+        out = os.path.join(tmp, f"{label}-cineon.tif")
+        h, _ = host.call("export_cineon_di", {"session": sid, "path": out})
+        check(h["ok"] and tiff_info(out) is not None and h["result"]["di"].get("encoding") == "cineon",
+              f"{label}: export_cineon_di", h.get("error"))
     # cancel: one arriving before its render is refused when it starts
     h, _ = host.call("cancel", {"session": sid, "progress_id": "never-ran"})
     check(h["ok"] and h["result"]["was_running"] is False, f"{label}: cancel (queued)")

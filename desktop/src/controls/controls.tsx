@@ -306,6 +306,40 @@ export function PillMenu<T extends string | number>(p: {
   );
 }
 
+// ------------------------------------------------------------------ TextRow
+
+/** A labelled text field that commits on Enter or blur (the edge print, the date). */
+export function TextRow(p: { label: string; value: string; placeholder?: string; onCommit: (v: string) => void; disabled?: boolean; maxLength?: number; testId?: string }) {
+  const [text, setText] = useState<string | null>(null);
+  useEffect(() => setText(null), [p.value]);
+  return (
+    <div className={'row' + (p.disabled ? ' disabled' : '')}>
+      <span className="row-label">{p.label}</span>
+      <input
+        className="unit-field text-field"
+        value={text ?? p.value}
+        placeholder={p.placeholder}
+        disabled={p.disabled}
+        maxLength={p.maxLength}
+        aria-label={p.label}
+        data-testid={p.testId}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          if (text != null && text !== p.value) p.onCommit(text);
+          setText(null);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+          if (e.key === 'Escape') {
+            setText(null);
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+      />
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- UnitField
 
 export function NumberField(p: { value: number; decimals: number; onCommit: (v: number) => void; disabled?: boolean; width?: number; label?: string }) {

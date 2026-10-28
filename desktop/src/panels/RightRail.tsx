@@ -356,12 +356,112 @@ function FilmFormatSection() {
 
 function ScenePlacementSection() {
   const gate = useSession((s) => s.gate);
+  const sid = useSession((s) => s.engineSession);
   const sl = useSession((s) => s.sidecar.params.sceneLatitude);
   const reason = unsupportedReason('scene_latitude_mapping', gate.sceneLatitude);
+  const [why, setWhy] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
+
+  // RFC-023 §8.3: the UI holds pull-backs, the engine solves the curve
+  // (`spk_scene_latitude`'s Fit) and only a valid Fit's params_delta is
+  // committed. A pull-back of 0 turns its side off.
+  const fit = (highlight: number, shadow: number) => {
+    setParams((p) => ({ ...p, sceneLatitude: { ...p.sceneLatitude, highlightPullBack: highlight, shadowPullBack: shadow } }));
+    if (timer.current) clearTimeout(timer.current);
+    if (!sid) return;
+    if (highlight <= 0 && shadow <= 0) {
+      setWhy(null);
+      setParams((p) => ({ ...p, sceneLatitude: { ...p.sceneLatitude, active: false, highlightRoom: 0, shadowRoom: 0 } }));
+      return;
+    }
+    timer.current = setTimeout(() => {
+      host()
+        .sceneLatitude(sid, { highlight_pull_back: highlight, shadow_pull_back: shadow })
+        .then((r) => {
+          const f = (r as { fit?: { valid?: boolean; issues?: { message?: string; code?: string }[]; params_delta?: Record<string, number | boolean | string> } }).fit;
+          if (!f?.valid || !f.params_delta) {
+            const issue = f?.issues?.[0];
+            setWhy(issue?.message ?? issue?.code ?? tz('These pull-backs do not fit this film and paper.', '这组回拉值不适合当前的胶片和相纸。'));
+            return;
+          }
+          const d = f.params_delta;
+          const num = (k: string, v: number) => (typeof d[k] === 'number' ? (d[k] as number) : v);
+          setWhy(null);
+          setParams((p) => ({
+            ...p,
+            sceneLatitude: {
+              ...p.sceneLatitude,
+              active: d.scene_latitude_active !== false,
+              highlightKnee: num('scene_latitude_highlight_knee', p.sceneLatitude.highlightKnee),
+              highlightRoom: num('scene_latitude_highlight_room', p.sceneLatitude.highlightRoom),
+              shadowKnee: num('scene_latitude_shadow_knee', p.sceneLatitude.shadowKnee),
+              shadowRoom: num('scene_latitude_shadow_room', p.sceneLatitude.shadowRoom),
+              rolloff: num('scene_latitude_rolloff', p.sceneLatitude.rolloff),
+              maxLift: num('scene_latitude_max_lift', p.sceneLatitude.maxLift),
+            },
+          }));
+        })
+        .catch((e) => setWhy(String((e as Error).message)));
+    }, 250);
+  };
+
+  const suggest = () => {
+    if (!sid) return;
+    host()
+      .sceneLatitude(sid, {})
+      .then((r) => {
+        const g = (r as { suggested?: { valid?: boolean; highlight_pull_back?: number; shadow_pull_back?: number } }).suggested;
+        if (!g?.valid) {
+          setWhy(tz('No placement lands this scene inside the medium.', '没有能把这个场景落在介质范围内的定位。'));
+          return;
+        }
+        fit(Math.round((g.highlight_pull_back ?? 0) * 4) / 4, Math.round((g.shadow_pull_back ?? 0) * 4) / 4);
+      })
+      .catch((e) => setWhy(String((e as Error).message)));
+  };
+
+  const disabled = !!reason || !sid;
   return (
-    <Section id="scenePlacement" title={t('sectionScenePlacement')} unsupported={reason} onReset={() => {}} resetHelp={t('helpResetPlacement')} resetEnabled={sl.active}>
-      <ScrubSlider label={t('placementHighlight')} value={sl.highlightPullBack} range={[0, 8]} snap={0.25} onChange={() => {}} disabled={!!reason} reason={reason ?? undefined} />
-      <ScrubSlider label={t('placementShadow')} value={sl.shadowPullBack} range={[0, 8]} snap={0.25} onChange={() => {}} disabled={!!reason} reason={reason ?? undefined} />
+    <Section
+      id="scenePlacement"
+      title={t('sectionScenePlacement')}
+      unsupported={reason}
+      onReset={() => fit(0, 0)}
+      resetHelp={t('helpResetPlacement')}
+      resetEnabled={sl.active || sl.highlightPullBack > 0 || sl.shadowPullBack > 0}
+    >
+      <ScrubSlider
+        label={t('placementHighlight')}
+        value={sl.highlightPullBack}
+        range={[0, 8]}
+        snap={0.25}
+        onChange={(v) => fit(v, sl.shadowPullBack)}
+        disabled={disabled}
+        reason={reason ?? undefined}
+        testId="placement-highlight"
+      />
+      <ScrubSlider
+        label={t('placementShadow')}
+        value={sl.shadowPullBack}
+        range={[0, 8]}
+        snap={0.25}
+        onChange={(v) => fit(sl.highlightPullBack, v)}
+        disabled={disabled}
+        reason={reason ?? undefined}
+        testId="placement-shadow"
+      />
+      <div className={'row' + (disabled ? ' disabled' : '')}>
+        <span className="row-label">{sl.active ? tz('Placed', '已定位') : tz('Off', '关闭')}</span>
+        <button className="pill-menu" disabled={disabled} onClick={suggest}>
+          <span>{tz('Suggest', '建议')}</span>
+        </button>
+      </div>
+      {why && (
+        <div className="row">
+          <span className="row-label">{why}</span>
+        </div>
+      )}
     </Section>
   );
 }

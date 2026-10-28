@@ -5,22 +5,31 @@
 // Three kinds of edit, three costs (ARCHITECTURE.md §7.1):
 //   params      → a `set_params` delta and a render (reprint if print-only)
 //   adjustments → Layer 2 in the canvas shader, no host call
-//   geometry    → applied when the canvas samples, no host call
+//   geometry    → applied when the canvas samples, no host call -- except
+//                 while the frame is cut before the engine (a film edge, or
+//                 the date under a crop: `cutsFrame`), when the crop is part
+//                 of the negative and a geometry edit is a render
+//                 (Session+FilmEdge.swift).
 //
 // Pixels do not live in this store: `frames.ts` holds them, and the store
 // carries a version number the canvas watches.
 
 import { createStore } from 'zustand/vanilla';
 import { useStore } from 'zustand';
+import { useMemo } from 'react';
 import type { HelloResult, HostState, FileMetadata, Tier } from '@shared/protocol';
 import {
+  type EngineCut,
   type FeatureGate,
   type FilmParams,
   type FilmSide,
   ALL_FEATURES,
   FILM_FRAME_CUSTOM,
+  cutsFrame,
   delta as paramsDelta,
   featureGate,
+  filmEdgeOn,
+  gateRatio,
   filmFormatMM,
   filmFrameNamed,
   fullDelta,
@@ -28,7 +37,8 @@ import {
   clamp,
 } from '@shared/params';
 import { type Adjustments, ADJUSTMENTS_DEFAULT } from '@shared/adjustments';
-import { type Geometry, GEOMETRY_DEFAULT, outputSize } from '@shared/geometry';
+import { resolvedFilmEdge } from '@shared/filmEdge';
+import { type Geometry, GEOMETRY_DEFAULT, constrained, outputSize } from '@shared/geometry';
 import { type DecodeSettings, type Sidecar, decodeSidecar, encodeSidecar, newSidecar } from '@shared/sidecar';
 import { decodeWire, isRawPath, modeOf } from '@shared/whiteBalance';
 import { type ClipboardGroup, type SettingsClip, CLIPBOARD_GROUPS, applyClip, clipChanges } from '@shared/clipboard';
@@ -160,6 +170,8 @@ const set = (p: Partial<SessionState>) => sessionStore.setState(p);
 // 400 ms after the last edit and is dropped if anything moved meanwhile.
 
 let sentParams: FilmParams | null = null;
+/** The engine cut that went with `sentParams`. */
+let sentCut: EngineCut | null = null;
 let wantedGen = 0;
 let inFlight = false;
 let fullTimer: ReturnType<typeof setTimeout> | null = null;
@@ -178,8 +190,101 @@ function previewEdge() {
   return settingsStore.getState().previewLongEdge;
 }
 
-function wireParams(p: FilmParams) {
-  return { ...fullDelta(p, get().gate), preview_long_edge: previewEdge() };
+function wireParams(p: FilmParams, cut: EngineCut | null) {
+  return { ...fullDelta(p, get().gate, cut), preview_long_edge: previewEdge() };
+}
+
+/**
+ * The params as the engine is sent them: the user's, with what the session
+ * fills in on the frame's behalf -- the stock's edge print, the gate's
+ * f-number, the date and the shooting data from EXIF (`resolvedFilmEdge`).
+ * The sidecar keeps the user's own; these are derived every time.
+ */
+export function resolvedParams(s: SessionState = get()): FilmParams {
+  const n = s.nativeSize;
+  const aspect = n ? Math.max(n.width, n.height) / Math.max(1, Math.min(n.width, n.height)) : 1.5;
+  const p = s.sidecar.params;
+  return resolvedFilmEdge(p, s.metadata, s.catalog.stock(p.filmStock)?.name, aspect, s.gate);
+}
+
+/**
+ * The crop the engine's frame is cut with, or null for the whole decode. While
+ * the crop tool is open the picture is framed over the uncut print (the Mac's
+ * README: the guide over the undeveloped picture), and leaving the tool
+ * develops the new framing.
+ */
+export function engineCut(s: SessionState = get()): Geometry | null {
+  return s.tool !== 'crop' && cutsFrame(s.sidecar.params, s.gate, s.sidecar.geometry) ? s.sidecar.geometry : null;
+}
+
+/**
+ * The geometry the canvas, the navigator, the filmstrip and an export apply
+ * to the print: none while the engine has cut it (the film canvas already is
+ * the framing).
+ */
+export function canvasGeometry(s: SessionState = get()): Geometry {
+  return engineCut(s) ? GEOMETRY_DEFAULT : s.sidecar.geometry;
+}
+
+/**
+ * Before a params change lands (`Session.filmEdgeWillChange`): turning the
+ * film edge on takes the crop into the gate's shape and holds it there, off
+ * gives the user's own crop back, and a new format reshapes the framing.
+ */
+let heldCrop: Geometry | null = null;
+function filmEdgeWillChange(from: FilmParams, to: FilmParams, g: Geometry): Geometry {
+  const gate = get().gate;
+  const was = filmEdgeOn(from, gate);
+  const now = filmEdgeOn(to, gate);
+  const size = get().nativeSize;
+  const framed = (format: string) => {
+    if (!size) return g;
+    const landscape = g.crop.width * size.width >= g.crop.height * size.height;
+    return constrained({ ...g, lockedRatio: gateRatio(format, landscape) }, size);
+  };
+  if (!was && now) {
+    heldCrop = g;
+    return framed(to.filmEdge.format);
+  }
+  if (was && !now) {
+    const back = heldCrop ?? { ...g, lockedRatio: null };
+    heldCrop = null;
+    return back;
+  }
+  if (now && to.filmEdge.format !== from.filmEdge.format) return framed(to.filmEdge.format);
+  return g;
+}
+
+/**
+ * The size `canvasGeometry` is relative to: the decode's, or while the engine
+ * has cut the frame, the film canvas's -- the print as it landed, so 100 % is
+ * the preview's pixels until the full render lands and the frame's own after.
+ */
+export function canvasSource(s: SessionState = get()): { width: number; height: number } | null {
+  if (engineCut(s) && frameImages.print) return { width: frameImages.print.width, height: frameImages.print.height };
+  return s.nativeSize;
+}
+
+/** `canvasGeometry` for a component (a stable reference: the sidecar's, or the default). */
+export function useCanvasGeometry(): Geometry {
+  return useSession((s) => canvasGeometry(s));
+}
+
+/** `canvasSource` for a component, as one object per size. */
+export function useCanvasSource(): { width: number; height: number } | null {
+  const w = useSession((s) => canvasSource(s)?.width ?? 0);
+  const h = useSession((s) => canvasSource(s)?.height ?? 0);
+  return useMemo(() => (w && h ? { width: w, height: h } : null), [w, h]);
+}
+
+/** The other orientation of the gate, without turning the picture (the Mac's Framing row). */
+export function flipFilmEdgeGate() {
+  const s = get();
+  const size = s.nativeSize;
+  if (!filmEdgeOn(s.sidecar.params, s.gate) || !size) return;
+  const g = s.sidecar.geometry;
+  const landscape = (g.lockedRatio ?? 1) >= 1;
+  setGeometry(() => constrained({ ...g, lockedRatio: gateRatio(s.sidecar.params.filmEdge.format, !landscape) }, size));
 }
 
 /**
@@ -208,11 +313,15 @@ export async function requestPrint(): Promise<void> {
       const gen = wantedGen;
       const s = get();
       if (s.engineSession !== sid) return;
-      const want = s.sidecar.params;
-      const d = sentParams ? paramsDelta(want, sentParams, s.gate) : { delta: wireParams(want), layers: new Set(['shoot']) };
+      const want = resolvedParams(s);
+      const cut = engineCut(s);
+      const d = sentParams
+        ? paramsDelta(want, sentParams, s.gate, cut, sentCut)
+        : { delta: wireParams(want, cut), layers: new Set(['shoot']) };
       if (Object.keys(d.delta).length) {
         await host().setParams(sid, d.delta);
         sentParams = want;
+        sentCut = cut;
       }
       const reprint = d.layers.size === 1 && d.layers.has('print');
       const r = await host().render(sid, 'live', { reprint });
@@ -314,7 +423,11 @@ export function setParams(fn: (p: FilmParams) => FilmParams) {
   const next = fn(s.sidecar.params);
   if (jsonEqual(next, s.sidecar.params)) return;
   pushUndo();
-  set({ sidecar: { ...get().sidecar, params: next, state: get().sidecar.state === 'processed' ? 'stale' : get().sidecar.state } });
+  const geometry = filmEdgeWillChange(s.sidecar.params, next, s.sidecar.geometry);
+  set({
+    sidecar: { ...get().sidecar, params: next, geometry, state: get().sidecar.state === 'processed' ? 'stale' : get().sidecar.state },
+    savedGeometry: s.selection && geometry !== s.sidecar.geometry ? { ...s.savedGeometry, [s.selection]: geometry } : s.savedGeometry,
+  });
   scheduleSave();
   void requestPrint();
 }
@@ -338,6 +451,8 @@ export function setGeometry(fn: (g: Geometry) => Geometry, opts: { coalesce?: bo
   set({ sidecar: { ...s.sidecar, geometry: next }, savedGeometry: s.selection ? { ...s.savedGeometry, [s.selection]: next } : s.savedGeometry });
   scheduleSave();
   if (settingsStore.getState().recalculateEffectsAfterCrop) recomputeFilmFormat();
+  // While the engine cuts the frame the crop is in the negative.
+  if (engineCut(get()) || sentCut) void requestPrint();
 }
 
 /**
@@ -622,6 +737,7 @@ export async function select(path: string): Promise<void> {
   const raw = await platform().sidecarLoad(path).catch(() => null);
   if (gen !== openGen) return;
   const sidecar = raw ? decodeSidecar(raw) : newSidecar();
+  heldCrop = null;
   set({
     selection: path,
     picked: get().picked.includes(path) ? get().picked : [path],
@@ -660,21 +776,23 @@ async function develop(path: string, gen: number) {
   set({ developing: true });
   try {
     const t0 = performance.now();
-    const params = get().sidecar.params;
+    const params = resolvedParams(get());
     const decode = decodeWire(get().sidecar.decode, isRawPath(path));
+    const cut = engineCut(get());
     let r;
     try {
-      r = await host().open(path, wireParams(params), decode);
+      r = await host().open(path, wireParams(params, cut), decode);
     } catch (e) {
       // A host without R2 refuses the decode key: open with the camera's own.
       if (!(decode && e instanceof HostCallError && e.code === 'unsupported')) throw e;
-      r = await host().open(path, wireParams(params));
+      r = await host().open(path, wireParams(params, cut));
     }
     if (gen !== openGen) {
       void host().close(r.session).catch(() => {});
       return;
     }
     sentParams = params;
+    sentCut = cut;
     sentDecode = JSON.stringify(decode);
     set({ engineSession: r.session, nativeSize: { width: r.width, height: r.height }, metadata: r.metadata, frameKind: r.kind ?? (isRawPath(path) ? 'raw' : null) });
     noteAsShot();
@@ -817,7 +935,11 @@ export function noteFitZoom(z: number) {
 }
 
 export function setTool(tool: Tool) {
+  const was = engineCut(get());
   set({ tool });
+  // Entering the crop tool shows the uncut print to frame; leaving it
+  // develops the new framing.
+  if (!jsonEqual(was, engineCut(get()))) void requestPrint();
 }
 export function setOriginal(on: boolean) {
   set({ showingOriginal: on });

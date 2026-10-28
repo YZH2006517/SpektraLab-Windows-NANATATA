@@ -105,13 +105,10 @@ function defaultFor(f: SchemaField): Value {
   }
 }
 
-export const UNSUPPORTED_ON_PORT = [
-  'digital_intermediate',
-  'scene_latitude_mapping',
-  'contrast_mask',
-  'overscan',
-  'date_imprint',
-];
+// The real host refused these five until they were ported to Vulkan
+// (engine/PORT_PLAN.md); it refuses none of them now. `realisticUnsupported`
+// still drives the refusal path when a test sets the list itself.
+export const UNSUPPORTED_ON_PORT: string[] = [];
 
 const STOCKS: Record<string, number> = {};
 function stockHue(id: string): number {
@@ -141,7 +138,7 @@ interface Session {
 const METHODS = [
   'hello', 'ping', 'shutdown', 'cancel', 'params_schema', 'print_lut_catalog', 'memory_report', 'probe', 'thumbnail',
   'open', 'redecode', 'close', 'set_params', 'get_params', 'solve', 'render', 'scene_latitude', 'overscan_geometry',
-  'preview_stock_lut', 'progress', 'export_image', 'export_cube', 'export_di',
+  'preview_stock_lut', 'progress', 'export_image', 'export_cube', 'export_di', 'export_cineon_di',
 ];
 
 class HostError extends Error {
@@ -401,6 +398,7 @@ export class MockHost {
       }
       case 'export_cube':
       case 'export_di':
+      case 'export_cineon_di':
         return { result: { path: String(p.path), mock: true } };
       default:
         throw new HostError('bad_request', `unknown method ${method}`);

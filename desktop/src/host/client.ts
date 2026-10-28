@@ -139,6 +139,10 @@ export class Host {
   async exportDi(session: string, printStock: string, path: string): Promise<{ path: string }> {
     return (await this.call<{ path: string }>('export_di', { session, print_stock: printStock, path }, 1_800_000)).result;
   }
+  /** RFC-028's Digital Intermediate as the Mac exports it: Cineon log, 16-bit, untagged (HOST-PROTOCOL.md). */
+  async exportCineonDi(session: string, path: string): Promise<{ path: string; width: number; height: number }> {
+    return (await this.call<{ path: string; width: number; height: number }>('export_cineon_di', { session, path }, 1_800_000)).result;
+  }
 }
 
 export type { FileMetadata };

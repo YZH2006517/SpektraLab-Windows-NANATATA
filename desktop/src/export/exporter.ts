@@ -107,6 +107,12 @@ export async function exportFrame(r: ExportRecipe, f: FrameToExport, catalog: St
     const target = await resolveTarget(dir, base, extensionOf(r), r.existing, (p) => platform().pathExists(p), joinPath);
     if (!target) return { kind: 'skipped', path: joinPath(dir, `${base}.${extensionOf(r)}`) };
     if (r.format === 'di') {
+      // The Cineon DI where the host has it (the Mac's export), else the
+      // first port's normalised-density tap.
+      if (methods?.includes('export_cineon_di')) {
+        const res = await host().exportCineonDi(f.session, target.path);
+        return { kind: 'written', path: res.path, width: res.width, height: res.height, carriesEdits: false };
+      }
       const res = await host().exportDi(f.session, f.params.printStock, target.path);
       return { kind: 'written', path: res.path, width: 0, height: 0, carriesEdits: false };
     }

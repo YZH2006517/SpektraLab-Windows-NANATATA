@@ -37,6 +37,8 @@ import {
   setGeometry,
   setOriginal,
   setView,
+  useCanvasGeometry,
+  useCanvasSource,
   useSession,
 } from '../state/session';
 import { HistogramOverlay, histogramOf, type Histogram } from './histogram';
@@ -94,9 +96,12 @@ export function Canvas() {
   const uploaded = useRef({ print: null as unknown, original: null as unknown });
 
   const imageVersion = useSession((s) => s.imageVersion);
-  const geometry = useSession((s) => s.sidecar.geometry);
+  // The canvas's geometry: the user's crop, or none while the engine has cut
+  // the frame (a film edge). The crop tool always sees the user's, since the
+  // engine does not cut while it is open (`engineCut`).
+  const geometry = useCanvasGeometry();
   const adjustments = useSession((s) => s.sidecar.adjustments);
-  const nativeSize = useSession((s) => s.nativeSize);
+  const nativeSize = useCanvasSource();
   const view = useSession((s) => s.view);
   const tool = useSession((s) => s.tool);
   const comparing = useSession((s) => s.comparing);

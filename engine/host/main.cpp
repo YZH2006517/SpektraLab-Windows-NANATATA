@@ -367,7 +367,7 @@ Json m_hello(const Request&) {
     for (const char* m : {"hello", "ping", "shutdown", "params_schema", "print_lut_catalog", "memory_report",
                           "probe", "thumbnail", "open", "redecode", "close", "set_params", "get_params", "solve", "render",
                           "scene_latitude", "overscan_geometry", "preview_stock_lut", "cancel", "progress",
-                          "export_image", "export_cube", "export_di", "write_image"})
+                          "export_image", "export_cube", "export_di", "export_cineon_di", "write_image"})
         methods.push(str(m));
     r.set("methods", std::move(methods));
     return r;
@@ -889,6 +889,36 @@ Json m_export_di(const Request& q) {
     return r;
 }
 
+// RFC-028's Digital Intermediate, as the Mac exports it (Exporter.swift
+// exportDigitalIntermediate): the session's own negative through a pipeline
+// of its own, whatever paper the canvas shows, written as Kodak Cineon log
+// in the output primaries, 16-bit and untagged -- Cineon is not a display
+// space, and a profile would invite a viewer to "correct" the codes. The
+// camera's shooting data travels. Geometry is already in the negative;
+// Post-Dev is not and must not be: the DI is where a grade starts.
+Json m_export_cineon_di(const Request& q) {
+    auto s = find_session(q.params);
+    const fs::path path = utf8_path(require_string(q.params, "path"));
+    Result result;
+    char* reply = nullptr;
+    const spk_status st = spk_render_digital_intermediate(s->handle, &result.r, &reply);
+    if (st != SPK_OK) { if (reply) spk_string_free(reply); engine_fail(st, "render_digital_intermediate"); }
+    Json info = take_json(reply);
+    const uint32_t w = result.r.width, h = result.r.height, stride = result.r.row_stride_px ? result.r.row_stride_px : w;
+    std::vector<uint16_t> rgb(size_t(w) * h * 3);
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x)
+            for (int c = 0; c < 3; ++c) rgb[(size_t(y) * w + x) * 3 + c] = result.r.rgba16[(size_t(y) * stride + x) * 4 + c];
+    std::vector<uint8_t> bytes;
+    std::string error;
+    const Exif exif = exif_of(s->metadata);
+    if (!encode_tiff(rgb.data(), w, h, 16, {}, bytes, error, &exif)) throw HostError{"io_error", error};
+    if (!write_file_atomic(path, bytes, q.params.at("overwrite").as_bool(false), error)) throw HostError{"io_error", error};
+    Json r = written(path, w, h, bytes.size(), "");
+    r.set("di", std::move(info));
+    return r;
+}
+
 void dispatch(const Request& q) {
     std::vector<uint8_t> payload;
     Json result;
@@ -914,6 +944,7 @@ void dispatch(const Request& q) {
     else if (m == "write_image") result = m_write_image(q);
     else if (m == "export_cube") result = m_export_cube(q);
     else if (m == "export_di") result = m_export_di(q);
+    else if (m == "export_cineon_di") result = m_export_cineon_di(q);
     else throw HostError{"unsupported", "unknown method '" + m + "'"};
     respond_ok(q.id, std::move(result), payload.data(), payload.size());
 }
