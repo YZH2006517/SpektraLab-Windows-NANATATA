@@ -32,6 +32,13 @@ export interface Transport {
   request(method: string, params: Record<string, unknown>, opts?: RequestOptions): Promise<Reply>;
   state(): Promise<HostState>;
   onState(cb: (s: HostState) => void): () => void;
+  /**
+   * `onState`, resolved once the listener is in place: a state the host
+   * reaches after this resolves is delivered. Boot subscribes with this and
+   * only then asks for the current state, so a transition between the two
+   * cannot be lost.
+   */
+  subscribeState(cb: (s: HostState) => void): Promise<() => void>;
   onEvent(cb: (e: Record<string, unknown>) => void): () => void;
   restart(): Promise<void>;
   diagnostics(): Promise<unknown>;

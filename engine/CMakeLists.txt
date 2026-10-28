@@ -134,9 +134,18 @@ if(NOT APPLE)
             list(APPEND vulkan_spirv "${spirv}")
         endforeach()
         set(SPEKTRALAB_VULKAN_SPIRV ${vulkan_spirv} CACHE INTERNAL "")
+        # The product's own profiles (CineStill 800T, the black-and-white films
+        # and Ilford's paper; resources_product/NOTICE.md) go in beside
+        # spektrafilm's, as build.sh's bundle lays them for the Mac: the engine
+        # opens a stock from one `profiles/` directory.
         add_custom_target(spektralab_vulkan_resources
             COMMAND "${CMAKE_COMMAND}" -E copy_directory
                     "${CMAKE_CURRENT_SOURCE_DIR}/resources" "${vulkan_resource_dir}"
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                    "${CMAKE_CURRENT_SOURCE_DIR}/resources_product/profiles" "${vulkan_resource_dir}/profiles"
+            COMMAND "${CMAKE_COMMAND}" -E copy
+                    "${CMAKE_CURRENT_SOURCE_DIR}/resources_product/NOTICE.md"
+                    "${vulkan_resource_dir}/PRODUCT_PROFILES_NOTICE.md"
             DEPENDS ${vulkan_spirv}
             VERBATIM)
 

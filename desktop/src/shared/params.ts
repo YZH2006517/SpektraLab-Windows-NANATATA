@@ -285,6 +285,13 @@ export interface FilmParams {
   printEffects: boolean;
   filmEdge: FilmEdgeSettings;
   dateBack: DateBackSettings;
+  /**
+   * The enlarger's pack sent as the neutral (C, M, Y), derived per render and
+   * never stored: Multigrade filter 2 for black and white on its paper
+   * (`FilmParams.multigradeFilter2`), because the engine's table has no row
+   * for a silver paper.
+   */
+  neutralPack?: [number, number, number] | null;
 }
 
 export const FILM_PARAMS_DEFAULT: FilmParams = {
@@ -507,6 +514,13 @@ export function wire(p: FilmParams, gate: FeatureGate = ALL_FEATURES, cut: Engin
     { name: 'extended_dynamic_range', value: effectiveEDR(p), layer: 'print' },
     { name: 'preflash_exposure', value: p.printEffects ? clamp(p.preflashExposure, 0, 1) : 0, layer: 'print' },
   );
+  if (p.neutralPack) {
+    f.push(
+      { name: 'c_filter_neutral', value: p.neutralPack[0], layer: 'print' },
+      { name: 'm_filter_neutral', value: p.neutralPack[1], layer: 'print' },
+      { name: 'y_filter_neutral', value: p.neutralPack[2], layer: 'print' },
+    );
+  }
   if (gate.contrastMask) {
     f.push(
       {

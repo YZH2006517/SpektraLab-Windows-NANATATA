@@ -67,6 +67,9 @@ export class Host {
   onState(cb: (s: HostState) => void) {
     return this.transport.onState(cb);
   }
+  subscribeState(cb: (s: HostState) => void) {
+    return this.transport.subscribeState(cb);
+  }
   onEvent(cb: (e: Record<string, unknown>) => void) {
     return this.transport.onEvent(cb);
   }

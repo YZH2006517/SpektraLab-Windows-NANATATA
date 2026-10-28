@@ -40,6 +40,10 @@ export function browserTransport(): Transport {
       stateListeners.add(cb);
       return () => stateListeners.delete(cb);
     },
+    async subscribeState(cb) {
+      stateListeners.add(cb);
+      return () => stateListeners.delete(cb);
+    },
     onEvent() {
       return () => {};
     },

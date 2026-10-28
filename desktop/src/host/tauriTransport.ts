@@ -30,6 +30,9 @@ export function tauriTransport(): Transport {
       const un = listen<HostState>('host-state', (e) => cb(e.payload));
       return () => void un.then((f) => f());
     },
+    async subscribeState(cb) {
+      return await listen<HostState>('host-state', (e) => cb(e.payload));
+    },
     onEvent(cb) {
       const un = listen<Record<string, unknown>>('host-event', (e) => cb(e.payload));
       return () => void un.then((f) => f());

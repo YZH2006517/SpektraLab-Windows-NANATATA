@@ -16,6 +16,7 @@
     "vitest.config.ts",
     "playwright.config.ts",
     "tests/**/*.ts",
+    "src/**/realhost.*.test.ts",
     "src/export/realhost.test.ts",
     "src/export/exporter.ts"
   ],

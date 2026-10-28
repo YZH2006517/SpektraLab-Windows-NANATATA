@@ -16,6 +16,7 @@ import {
   swapPairHoles,
   pasteSettings,
   resolvedParams,
+  selectFilmStock,
   setGeometry,
   setPages,
   setParams,
@@ -194,7 +195,11 @@ function FilmSection() {
   const catalog = useSession((s) => s.catalog);
   const film = useSession((s) => s.sidecar.params.filmStock);
   const rows = catalog.filmGroups().flatMap((g) => [
-    { id: '__g' + g.title, name: g.title === 'Positive' ? t('filmGroupPositive') : t('filmGroupNegative'), header: true },
+    {
+      id: '__g' + g.title,
+      name: g.title === 'Positive' ? t('filmGroupPositive') : g.title === 'Negative' ? t('filmGroupNegative') : tz('Black and White', '黑白'),
+      header: true,
+    },
     ...g.films.map((f) => ({ id: f.id, name: f.name, cine: f.use === 'cine', cover: catalog.coverURL(f.id) })),
   ]);
   return (
@@ -212,7 +217,7 @@ function FilmSection() {
         },
       ]}
     >
-      <StockList rows={rows} selected={film} onSelect={(id) => setParams((p) => ({ ...p, filmStock: id }))} testId="film-list" />
+      <StockList rows={rows} selected={film} onSelect={(id) => selectFilmStock(id)} testId="film-list" />
     </Section>
   );
 }
@@ -537,7 +542,18 @@ function PrintSection() {
       g.papers.length
         ? [
             { id: '__g' + g.title, name: g.title === 'Still' ? t('printGroupStill') : t('printGroupCine'), header: true },
-            ...g.papers.map((s) => ({ id: s.id, name: s.name, cine: s.use === 'cine', disabled: positive, reason: positiveReason })),
+            ...g.papers.map((s) => {
+              const silver = !catalog.canPrint(p.filmStock, s.id);
+              return {
+                id: s.id,
+                name: s.name,
+                cine: s.use === 'cine',
+                disabled: positive || silver,
+                reason: positive
+                  ? positiveReason
+                  : tz('Silver film prints on silver paper, colour on colour.', '黑白胶片只能印在黑白相纸上，彩色印在彩色相纸上。'),
+              };
+            }),
           ]
         : [],
     ),
@@ -556,7 +572,7 @@ function PrintSection() {
         onSelect={(id) => {
           if (id === POSITIVE_ID) setParams((q) => ({ ...q, scanFilm: true, digitalIntermediate: false }));
           else if (id === DIGITAL_ID) setParams((q) => ({ ...q, scanFilm: false, digitalIntermediate: true }));
-          else if (!positive) setParams((q) => ({ ...q, printStock: id, scanFilm: false, digitalIntermediate: false }));
+          else if (!positive && catalog.canPrint(p.filmStock, id)) setParams((q) => ({ ...q, printStock: id, scanFilm: false, digitalIntermediate: false }));
         }}
       />
       <ToggleRow label={t('printEffects')} on={p.printEffects} onChange={(v) => setParams((q) => ({ ...q, printEffects: v }))} />

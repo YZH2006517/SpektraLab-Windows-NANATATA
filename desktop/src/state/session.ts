@@ -25,6 +25,7 @@ import {
   type FilmSide,
   ALL_FEATURES,
   FILM_FRAME_CUSTOM,
+  FILM_PARAMS_DEFAULT,
   cutsFrame,
   delta as paramsDelta,
   featureGate,
@@ -43,7 +44,7 @@ import { type Geometry, GEOMETRY_DEFAULT, constrained, outputSize } from '@share
 import { type DecodeSettings, type Sidecar, decodeSidecar, encodeSidecar, newSidecar } from '@shared/sidecar';
 import { decodeWire, isRawPath, modeOf } from '@shared/whiteBalance';
 import { type ClipboardGroup, type SettingsClip, CLIPBOARD_GROUPS, applyClip, clipChanges } from '@shared/clipboard';
-import { EMPTY_CATALOG, type StockCatalog, loadCatalog } from '@shared/stocks';
+import { EMPTY_CATALOG, type StockCatalog, loadCatalog, monochromeResolved } from '@shared/stocks';
 import { HostCallError, host } from '../host/client';
 import { type FileEntry, baseName, dirName, platform } from '../platform';
 import { settingsStore } from './settings';
@@ -201,6 +202,21 @@ function wireParams(p: FilmParams, cut: EngineCut | null) {
 }
 
 /**
+ * Choosing a film (`Session.selectFilmStock`): it follows its declared paper,
+ * and between colour and black and white the paper cannot stay.
+ */
+export function selectFilmStock(id: string) {
+  const catalog = get().catalog;
+  setParams((p) => {
+    let printStock = p.printStock;
+    const target = catalog.stock(id)?.targetPrint;
+    if (target && catalog.stock(target)) printStock = target;
+    if (!catalog.canPrint(id, printStock)) printStock = target ?? FILM_PARAMS_DEFAULT.printStock;
+    return { ...p, filmStock: id, printStock };
+  });
+}
+
+/**
  * The params as the engine is sent them: the user's, with what the session
  * fills in on the frame's behalf -- the stock's edge print, the gate's
  * f-number, the date and the shooting data from EXIF (`resolvedFilmEdge`).
@@ -209,7 +225,7 @@ function wireParams(p: FilmParams, cut: EngineCut | null) {
 export function resolvedParams(s: SessionState = get()): FilmParams {
   const n = s.nativeSize;
   const aspect = n ? Math.max(n.width, n.height) / Math.max(1, Math.min(n.width, n.height)) : 1.5;
-  const p = s.sidecar.params;
+  const p = monochromeResolved(s.sidecar.params, s.catalog);
   if (!s.pair) return resolvedFilmEdge(p, s.metadata, s.catalog.stock(p.filmStock)?.name, aspect, s.gate);
   // A pair is 135_half exposed twice on one strip, each frame with its own
   // date (Session.resolved on the Mac); the piece is already the gate's shape.
@@ -1153,9 +1169,28 @@ function takeHostState(st: HostState) {
 }
 
 export async function boot() {
-  host().onState(takeHostState);
+  // Subscribe first and wait until the listener is in place, then ask. The
+  // two used to race: a host that became ready between the (unawaited)
+  // `listen` and the `host_state` answer lost its "ready" event, and the
+  // window waited for the engine forever, now and then. A state heard while
+  // asking is newer than the answer, so the answer is then dropped.
+  let heard = false;
+  await host().subscribeState((st) => {
+    heard = true;
+    takeHostState(st);
+  });
   void loadCatalog().then((catalog) => set({ catalog }));
-  takeHostState(await host().state());
+  const now = await host().state();
+  if (!heard) takeHostState(now);
+  // A backstop while the host is still starting: ask again every 2 s for
+  // 30 s, so no lost event can leave the window waiting.
+  void (async () => {
+    for (let i = 0; i < 15 && get().hostState.phase === 'starting'; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (get().hostState.phase !== 'starting') break;
+      takeHostState(await host().state());
+    }
+  })();
   platform().onOpenPaths((paths) => void openPaths(paths));
   platform().onDrop((paths) => void openPaths(paths));
   const launch = await platform().takeLaunchPaths();
