@@ -401,6 +401,22 @@ fn platform_dir() -> &'static str {
     }
 }
 
+/// Tauri's `resource_dir()` on Windows is a verbatim path (`\\?\C:\…`). The
+/// engine appends `/name` to `--resources`, and a verbatim path turns off the
+/// `/` → `\` translation, so every resource open failed in an installed app
+/// ("cannot open \\?\C:\…\engine/spektrafilm_constants.bin"). Hand it the
+/// ordinary form instead.
+fn plain_path(p: &Path) -> PathBuf {
+    let s = p.as_os_str().to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p.to_path_buf()
+    }
+}
+
 fn launch_in_dir(dir: &Path, origin: &str) -> Option<Launch> {
     let program = dir.join(exe_name());
     if !program.is_file() {
@@ -447,7 +463,7 @@ pub fn resolve_launch<R: Runtime>(app: &AppHandle<R>) -> Result<Launch, String> 
             let resources = app
                 .path()
                 .resource_dir()
-                .map(|r| r.join("host").join("engine"))
+                .map(|r| plain_path(&r.join("host").join("engine")))
                 .unwrap_or_else(|_| dir.join("engine"));
             let mut args = vec!["--resources".to_string(), resources.display().to_string()];
             if let Ok(device) = std::env::var("SPEKTRALAB_HOST_DEVICE") {
@@ -469,4 +485,19 @@ pub fn resolve_launch<R: Runtime>(app: &AppHandle<R>) -> Result<Launch, String> 
         "SpektraLab could not find its engine host ({}). Reinstall the app, or set SPEKTRALAB_HOST_DIR.",
         exe_name()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_path_drops_the_verbatim_prefix() {
+        assert_eq!(plain_path(Path::new(r"\\?\C:\Program Files\SpektraLab\host\engine")),
+                   PathBuf::from(r"C:\Program Files\SpektraLab\host\engine"));
+        assert_eq!(plain_path(Path::new(r"\\?\UNC\server\share\engine")),
+                   PathBuf::from(r"\\server\share\engine"));
+        assert_eq!(plain_path(Path::new("/opt/spektralab/engine")),
+                   PathBuf::from("/opt/spektralab/engine"));
+    }
 }
